@@ -27,6 +27,18 @@ Instalación de dependencias:
 pip install pandas matplotlib
 ```
 
+## Argumentos
+
+--nodos: Número total de nodos en la red.
+--mensajes_hora: Mensajes enviados por cada nodo por hora.
+--eficiencia: Eficiencia del canal (valor entre 0 y 1, default: 0.18).
+--canales: Número de canales por gateway (default: 8).
+--seguridad: Factor de seguridad adicional sobre la carga estimada (default: 0.6).
+--payload_bytes: Tamaño del mensaje en bytes (de 1 a 250, default: 20).
+--distribucion_sf: Ruta a un archivo .json con la distribución de Spreading Factors.
+--export_excel: Nombre del archivo Excel para guardar los resultados (opcional).
+--grafico: Nombre del archivo de imagen (PNG) para guardar el gráfico (opcional).
+
 ## Uso
 
 Ejemplo de ejecución:
