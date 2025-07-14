@@ -85,5 +85,5 @@ python gateway_estimation.py \
 
 ## Autor
 
-Proyecto desarrollado para optimizar el despliegue de redes LoRaWAN en aplicaciones logísticas portuarias.
+Proyecto desarrollado por b-konnet para optimizar el despliegue de redes LoRaWAN en aplicaciones logísticas portuarias.
 
