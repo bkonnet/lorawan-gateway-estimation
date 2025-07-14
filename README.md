@@ -72,5 +72,5 @@ Gráfico de barras de carga por SF (opcional)
 
 Autor
 
-Proyecto desarrollado para optimizar el despliegue de redes LoRaWAN en aplicaciones logísticas portuarias.
+Proyecto desarrollado por b-konnet para optimizar el despliegue de redes LoRaWAN en aplicaciones logísticas portuarias.
 
