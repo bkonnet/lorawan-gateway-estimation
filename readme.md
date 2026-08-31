@@ -21,7 +21,7 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Overhead LoRaWAN físico incluido automáticamente (uplink y ACK).
 - Advertencia por dwell time uplink de 400 ms.
 - Perfil operativo **Terminal Contenedores**.
-- Carga de polígonos GeoJSON (`Polygon` o `MultiPolygon`).
+- Carga directa de KMZ/KML de Google Earth o polígonos GeoJSON.
 - Planificación con redundancia de 1 a 3 gateways por punto.
 - Perfil RF ajustable para terminales de contenedores.
 - Distribución SF derivada del link budget y la geometría.
@@ -246,7 +246,11 @@ Activar **Incorporar polígono y cobertura RF** para combinar capacidad y cobert
 
 ### Polígono
 
-La aplicación acepta archivos GeoJSON WGS84 con cualquiera de estas topologías:
+La aplicación acepta directamente:
+
+- KMZ de Google Earth con uno o más polígonos.
+- KML con uno o más elementos `Polygon`.
+- GeoJSON WGS84 con cualquiera de estas topologías:
 
 - `Polygon`
 - `MultiPolygon`
@@ -254,6 +258,8 @@ La aplicación acepta archivos GeoJSON WGS84 con cualquiera de estas topologías
 - `FeatureCollection`
 
 El archivo `examples/terminal_example.geojson` sirve como plantilla. Sus coordenadas son solo demostrativas y deben reemplazarse por el recinto real.
+
+No es necesario convertir previamente un KMZ. Si contiene varias carpetas o elementos, la aplicación extrae todos los polígonos del documento KML principal. Las rutas y los marcadores se ignoran.
 
 ### Ambiente RF
 

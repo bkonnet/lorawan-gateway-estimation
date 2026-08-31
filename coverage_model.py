@@ -8,9 +8,12 @@ The result is a planning estimate, not a substitute for a calibrated RF survey.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 import json
 import math
 from typing import Iterable
+import xml.etree.ElementTree as ET
+from zipfile import BadZipFile, ZipFile
 
 
 EARTH_RADIUS_M = 6_371_000.0
@@ -160,6 +163,80 @@ def parse_geojson(value: str | bytes | dict) -> ProjectedGeometry:
     if geometry.area_m2 <= 0:
         raise ValueError("El polígono no tiene un área válida.")
     return geometry
+
+
+def parse_kml(value: str | bytes) -> ProjectedGeometry:
+    """Parse all Polygon elements from a KML document."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8-sig")
+    try:
+        root = ET.fromstring(value)
+    except ET.ParseError as exc:
+        raise ValueError(f"El archivo KML no es válido: {exc}") from exc
+
+    polygons = []
+    for polygon_element in root.findall(".//{*}Polygon"):
+        outer = polygon_element.find(
+            "./{*}outerBoundaryIs/{*}LinearRing/{*}coordinates"
+        )
+        if outer is None or not (outer.text or "").strip():
+            continue
+        rings = [_parse_kml_coordinates(outer.text or "")]
+        for inner in polygon_element.findall(
+            "./{*}innerBoundaryIs/{*}LinearRing/{*}coordinates"
+        ):
+            if (inner.text or "").strip():
+                rings.append(_parse_kml_coordinates(inner.text or ""))
+        polygons.append(rings)
+
+    if not polygons:
+        raise ValueError(
+            "El KML/KMZ no contiene polígonos. Verifique que no sea solamente una ruta o marcadores."
+        )
+    return parse_geojson({"type": "MultiPolygon", "coordinates": polygons})
+
+
+def parse_kmz(value: bytes) -> ProjectedGeometry:
+    """Extract KML documents from a KMZ archive and parse their polygons."""
+    try:
+        with ZipFile(BytesIO(value)) as archive:
+            kml_names = [name for name in archive.namelist() if name.lower().endswith(".kml")]
+            if not kml_names:
+                raise ValueError("El KMZ no contiene ningún archivo KML.")
+            # doc.kml is the conventional root; otherwise use the first KML.
+            selected = next(
+                (name for name in kml_names if name.lower().endswith("doc.kml")),
+                kml_names[0],
+            )
+            return parse_kml(archive.read(selected))
+    except BadZipFile as exc:
+        raise ValueError("El archivo KMZ no es un ZIP/KMZ válido.") from exc
+
+
+def parse_polygon_file(filename: str, value: bytes) -> ProjectedGeometry:
+    """Route a supported polygon file to its parser."""
+    extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if extension in {"geojson", "json"}:
+        return parse_geojson(value)
+    if extension == "kml":
+        return parse_kml(value)
+    if extension == "kmz":
+        return parse_kmz(value)
+    raise ValueError("Formato no soportado. Use GeoJSON, JSON, KML o KMZ.")
+
+
+def _parse_kml_coordinates(text: str) -> list[list[float]]:
+    coordinates = []
+    for token in text.replace("\n", " ").replace("\t", " ").split():
+        parts = token.split(",")
+        if len(parts) < 2:
+            continue
+        coordinates.append([float(parts[0]), float(parts[1])])
+    if len(coordinates) < 3:
+        raise ValueError("Un polígono KML contiene menos de tres coordenadas válidas.")
+    if coordinates[0] != coordinates[-1]:
+        coordinates.append(coordinates[0])
+    return coordinates
 
 
 def _iter_polygon_geometries(data: dict) -> Iterable[list[list[list[float]]]]:

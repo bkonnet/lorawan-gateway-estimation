@@ -1,6 +1,8 @@
 import json
+from io import BytesIO
 import math
 import unittest
+from zipfile import ZipFile
 
 from coverage_model import (
     RadioConfig,
@@ -8,6 +10,9 @@ from coverage_model import (
     coverage_radius_m,
     gateway_sites_geojson,
     parse_geojson,
+    parse_kml,
+    parse_kmz,
+    parse_polygon_file,
     plan_coverage,
 )
 
@@ -29,12 +34,33 @@ SQUARE = {
     },
 }
 
+SQUARE_KML = """<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><Polygon>
+<outerBoundaryIs><LinearRing><coordinates>
+-96.705,33.005,0 -96.695,33.005,0 -96.695,33.015,0
+-96.705,33.015,0 -96.705,33.005,0
+</coordinates></LinearRing></outerBoundaryIs>
+</Polygon></Placemark></Document></kml>"""
+
 
 class CoverageModelTests(unittest.TestCase):
     def test_geojson_area_is_plausible(self):
         geometry = parse_geojson(json.dumps(SQUARE))
         self.assertGreater(geometry.area_m2, 900_000)
         self.assertLess(geometry.area_m2, 1_200_000)
+
+    def test_kml_area_matches_geojson(self):
+        geojson_geometry = parse_geojson(SQUARE)
+        kml_geometry = parse_kml(SQUARE_KML)
+        self.assertAlmostEqual(kml_geometry.area_m2, geojson_geometry.area_m2, delta=1.0)
+
+    def test_kmz_is_accepted_directly(self):
+        buffer = BytesIO()
+        with ZipFile(buffer, "w") as archive:
+            archive.writestr("doc.kml", SQUARE_KML)
+        geometry = parse_kmz(buffer.getvalue())
+        routed = parse_polygon_file("terminal.KMZ", buffer.getvalue())
+        self.assertAlmostEqual(geometry.area_m2, routed.area_m2, delta=1.0)
 
     def test_container_environment_radius_is_finite(self):
         config = RadioConfig(

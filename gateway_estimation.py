@@ -8,7 +8,7 @@ from coverage_model import (
     RadioConfig,
     augment_gateway_sites,
     gateway_sites_geojson,
-    parse_geojson,
+    parse_polygon_file,
     plan_coverage,
     points_to_lon_lat,
 )
@@ -518,9 +518,9 @@ def app_streamlit():
             icon="🗺️",
         )
         geojson_file = st.file_uploader(
-            "Polígono del recinto (GeoJSON)",
-            type=["geojson", "json"],
-            help="Acepta Polygon, MultiPolygon, Feature o FeatureCollection en WGS84.",
+            "Polígono del recinto (KMZ, KML o GeoJSON)",
+            type=["kmz", "kml", "geojson", "json"],
+            help="KMZ/KML de Google Earth o GeoJSON Polygon/MultiPolygon en WGS84.",
         )
         environment_name = st.selectbox(
             "Ambiente RF",
@@ -577,7 +577,9 @@ def app_streamlit():
 
         if geojson_file is not None:
             try:
-                coverage_geometry = parse_geojson(geojson_file.getvalue())
+                coverage_geometry = parse_polygon_file(
+                    geojson_file.name, geojson_file.getvalue()
+                )
                 radio_config = RadioConfig(
                     tx_eirp_dbm=float(tx_eirp),
                     gateway_gain_dbi=float(gateway_gain),
