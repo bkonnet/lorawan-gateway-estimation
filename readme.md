@@ -1,6 +1,6 @@
 # Estimador Interactivo de Gateways LoRaWAN para AU915
 
-Herramienta interactiva desarrollada en Python + Streamlit para estimar la cantidad de gateways LoRaWAN requeridos en redes **AU915-928**, considerando tráfico uplink, ACK/downlink, bloqueo half-duplex del gateway, distribución de Spreading Factors y escenarios con o sin ADR.
+Herramienta interactiva desarrollada en Python + Streamlit para estimar la cantidad de gateways LoRaWAN requeridos en redes **AU915-928**, combinando capacidad de tráfico, cobertura geográfica, redundancia, ambiente RF, ACK/downlink y distribución de Spreading Factors.
 
 Está orientada a despliegues industriales, logísticos y portuarios, especialmente en ambientes con contenedores metálicos, multipath, ruido RF y dispositivos que usan **confirmed uplink con ACK**.
 
@@ -18,8 +18,14 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
   - cuello de botella por airtime ACK,
   - cuello de botella por bloqueo RX half-duplex.
 - Cálculo de Time on Air para uplink y ACK/downlink.
+- Overhead LoRaWAN físico incluido automáticamente (uplink y ACK).
 - Advertencia por dwell time uplink de 400 ms.
 - Perfil operativo **Terminal Contenedores**.
+- Carga de polígonos GeoJSON (`Polygon` o `MultiPolygon`).
+- Planificación con redundancia de 1 a 3 gateways por punto.
+- Perfil RF ajustable para terminales de contenedores.
+- Distribución SF derivada del link budget y la geometría.
+- Exportación de ubicaciones preliminares en CSV y GeoJSON.
 - Exportación de resultados a CSV.
 - Gráficos de carga uplink, airtime ACK y comparación RX1/RX2.
 
@@ -38,7 +44,7 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 Instalar con:
 
 ```bash
-pip install streamlit pandas matplotlib openpyxl
+pip install -r requirements.txt
 ```
 
 En Windows, si usas el lanzador `py`:
@@ -162,9 +168,11 @@ Ejemplos:
 
 A mayor valor, mayor carga uplink y mayor carga ACK.
 
-#### Payload uplink bytes
+#### Payload de aplicación uplink
 
-Tamaño del mensaje uplink en bytes.
+Tamaño de `FRMPayload` en bytes. No se deben sumar manualmente las cabeceras.
+
+El estimador añade automáticamente los 13 bytes mínimos de LoRaWAN correspondientes a MHDR, FHDR, FPort y MIC. También permite añadir FOpts promedio en las opciones avanzadas.
 
 - Valores mayores aumentan el Time on Air.
 - Mayor Time on Air reduce la capacidad.
@@ -224,11 +232,51 @@ Porcentaje de uplinks que requieren ACK.
 
 Si los sensores usan confirmed uplink siempre, usar `1.0`.
 
-#### Payload ACK downlink bytes
+#### Payload de aplicación ACK/downlink
 
 Payload adicional en el downlink ACK.
 
-Normalmente un ACK simple puede modelarse como `0 bytes` de payload de aplicación. Si además se envían comandos MAC o payload de aplicación, se puede aumentar.
+Normalmente un ACK simple se configura como `0 bytes` de payload de aplicación. El estimador añade automáticamente el paquete físico mínimo de 12 bytes. Si además se envía payload de aplicación, se incorpora FPort y el tamaño indicado.
+
+---
+
+## Cobertura geográfica, ambiente y redundancia
+
+Activar **Incorporar polígono y cobertura RF** para combinar capacidad y cobertura.
+
+### Polígono
+
+La aplicación acepta archivos GeoJSON WGS84 con cualquiera de estas topologías:
+
+- `Polygon`
+- `MultiPolygon`
+- `Feature`
+- `FeatureCollection`
+
+El archivo `examples/terminal_example.geojson` sirve como plantilla. Sus coordenadas son solo demostrativas y deben reemplazarse por el recinto real.
+
+### Ambiente RF
+
+Los presets definen valores iniciales de exponente de pérdida, pérdida adicional y margen de desvanecimiento. Todos son editables. El preset **Terminal de contenedores** es deliberadamente conservador, pero debe calibrarse con mediciones RSSI/SNR del sitio.
+
+### Redundancia
+
+El campo **Gateways mínimos por punto** exige que cada punto de la cuadrícula esté dentro del radio estimado de 1, 2 o 3 gateways distintos. Para una red crítica se recomienda comenzar con 2.
+
+### Algoritmo
+
+1. Proyecta el GeoJSON a un plano local.
+2. Calcula un radio efectivo mediante link budget y un modelo log-distance.
+3. Muestrea el polígono en una cuadrícula configurable.
+4. Selecciona ubicaciones preliminares mediante un algoritmo greedy multi-cover.
+5. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
+6. Calcula el resultado final como el máximo entre capacidad y cobertura.
+
+```text
+Gateways finales = MAX(gateways por capacidad, gateways por cobertura)
+```
+
+Las ubicaciones son candidatas matemáticas dentro del polígono. Antes de construir se deben validar acceso físico, energía, backhaul, altura, permisos, estructuras metálicas y mediciones de campo.
 
 - Mayor payload ACK aumenta airtime downlink.
 - Mayor airtime downlink aumenta bloqueo half-duplex del gateway.
@@ -420,7 +468,8 @@ Cantidad de gateways requerida para mantener bajo control el bloqueo RX half-dup
 La herramienta **no suma** los tres valores anteriores. Usa el máximo cuello de botella:
 
 ```text
-Gateways estimados = MAX(uplink, ACK airtime, ACK blocking) × factor de seguridad
+Gateways capacidad = MAX(uplink, ACK airtime, ACK blocking) × factor de seguridad
+Gateways finales = MAX(gateways capacidad, gateways cobertura)
 ```
 
 ### Gateways recomendados

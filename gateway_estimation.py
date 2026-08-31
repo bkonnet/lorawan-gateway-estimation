@@ -1,6 +1,17 @@
+import json
 import math
 
 import pandas as pd
+
+from coverage_model import (
+    ENVIRONMENT_PRESETS,
+    RadioConfig,
+    augment_gateway_sites,
+    gateway_sites_geojson,
+    parse_geojson,
+    plan_coverage,
+    points_to_lon_lat,
+)
 
 try:
     import streamlit as st
@@ -60,7 +71,8 @@ def calcular_toa(sf: int, payload_bytes: int, bw: int = 125_000) -> float:
     cr = 1
     ih = 0
     crc = 1
-    de = 1 if sf >= 11 else 0
+    # Low Data Rate Optimization applies when the symbol exceeds 16 ms.
+    de = 1 if ((2 ** sf) / bw) > 0.016 else 0
     preamble = 8
 
     t_sym = (2 ** sf) / bw
@@ -74,6 +86,17 @@ def calcular_toa(sf: int, payload_bytes: int, bw: int = 125_000) -> float:
         0,
     )
     return round(t_preamble + payload_symbols * t_sym, 4)
+
+
+def payload_fisico_uplink(payload_aplicacion_bytes: int, fopts_bytes: int = 0) -> int:
+    """LoRaWAN data uplink: MHDR + FHDR + FPort + FRMPayload + MIC."""
+    return 13 + max(payload_aplicacion_bytes, 0) + max(fopts_bytes, 0)
+
+
+def payload_fisico_downlink(payload_aplicacion_bytes: int, fopts_bytes: int = 0) -> int:
+    """ACK-only is 12 bytes; a frame with application payload also carries FPort."""
+    base = 13 if payload_aplicacion_bytes > 0 else 12
+    return base + max(payload_aplicacion_bytes, 0) + max(fopts_bytes, 0)
 
 
 def validar_distribucion(distribucion_sf: dict) -> None:
@@ -154,6 +177,9 @@ def estimar_gateways(
     eficiencia_downlink_ack: float,
     max_blocking_rx: float,
     retransmission_factor: float,
+    fopts_uplink_bytes: int = 0,
+    fopts_downlink_bytes: int = 0,
+    uplink_dwell_time_enabled: bool = True,
 ) -> tuple[pd.DataFrame, dict, list[str]]:
     validar_distribucion(distribucion_sf)
     advertencias = []
@@ -168,13 +194,17 @@ def estimar_gateways(
         sf_ul = int(sf_label.replace("SF", ""))
         proporcion = distribucion_sf[sf_label]
         nodos_sf = int(round(nodos_totales * proporcion))
-        mensajes_hora_sf = nodos_sf * mensajes_por_nodo_por_hora
+        mensajes_base_hora_sf = nodos_sf * mensajes_por_nodo_por_hora
+        # The retransmission factor describes retries of confirmed transactions.
+        multiplicador_uplink = 1 + confirmed_ratio * (retransmission_factor - 1)
+        mensajes_hora_sf = mensajes_base_hora_sf * multiplicador_uplink
 
-        toa_uplink = calcular_toa(sf_ul, payload_uplink_bytes, bw=125_000)
+        payload_ul_fisico = payload_fisico_uplink(payload_uplink_bytes, fopts_uplink_bytes)
+        toa_uplink = calcular_toa(sf_ul, payload_ul_fisico, bw=125_000)
         toa_ul_ms = toa_uplink * 1000
-        if toa_ul_ms > AU915_DWELL_TIME_MS and nodos_sf > 0:
+        if uplink_dwell_time_enabled and toa_ul_ms > AU915_DWELL_TIME_MS and nodos_sf > 0:
             advertencias.append(
-                f"⚠ DWELL TIME UPLINK: SF{sf_ul} con {payload_uplink_bytes} bytes = "
+                f"⚠ DWELL TIME UPLINK: SF{sf_ul} con {payload_ul_fisico} bytes físicos = "
                 f"{toa_ul_ms:.0f} ms > 400 ms. Revisar payload, SF o dwell-time regional."
             )
 
@@ -183,11 +213,12 @@ def estimar_gateways(
         carga_uplink = mensajes_hora_sf / capacidad_aloha_uplink_gw if capacidad_aloha_uplink_gw else 0
 
         sf_dl_rx1 = AU915_UL_TO_DL_SF[sf_ul]
-        toa_ack_rx1 = calcular_toa(sf_dl_rx1, ack_payload_bytes, bw=AU915_DOWNLINK_BW)
-        toa_ack_rx2 = calcular_toa(AU915_RX2_SF, ack_payload_bytes, bw=AU915_DOWNLINK_BW)
+        payload_ack_fisico = payload_fisico_downlink(ack_payload_bytes, fopts_downlink_bytes)
+        toa_ack_rx1 = calcular_toa(sf_dl_rx1, payload_ack_fisico, bw=AU915_DOWNLINK_BW)
+        toa_ack_rx2 = calcular_toa(AU915_RX2_SF, payload_ack_fisico, bw=AU915_DOWNLINK_BW)
         toa_ack_ponderado = (toa_ack_rx1 * (1 - rx2_fallback_ratio)) + (toa_ack_rx2 * rx2_fallback_ratio)
 
-        ack_attempts_hora_sf = mensajes_hora_sf * confirmed_ratio * retransmission_factor
+        ack_attempts_hora_sf = mensajes_base_hora_sf * confirmed_ratio * retransmission_factor
         airtime_ack_s_hora_sf = ack_attempts_hora_sf * toa_ack_ponderado
         blocking_fraction_sf = airtime_ack_s_hora_sf / 3600
 
@@ -201,11 +232,17 @@ def estimar_gateways(
                 "SF UL": sf_label,
                 "Distribución": round(proporcion, 3),
                 "Nodos": nodos_sf,
-                "Uplinks/hora": round(mensajes_hora_sf, 1),
-                "Payload UL bytes": payload_uplink_bytes,
+                "Uplinks base/hora": round(mensajes_base_hora_sf, 1),
+                "Uplinks aire/hora": round(mensajes_hora_sf, 1),
+                "Payload app UL": payload_uplink_bytes,
+                "Payload físico UL": payload_ul_fisico,
                 "ToA UL (s)": toa_uplink,
                 "ToA UL (ms)": round(toa_ul_ms, 0),
-                "Dwell OK UL": "✓" if toa_ul_ms <= AU915_DWELL_TIME_MS else "⚠ revisar",
+                "Dwell OK UL": (
+                    "no aplica"
+                    if not uplink_dwell_time_enabled
+                    else ("✓" if toa_ul_ms <= AU915_DWELL_TIME_MS else "⚠ revisar")
+                ),
                 "Carga uplink": round(carga_uplink, 3),
                 "SF DL RX1": f"SF{sf_dl_rx1}",
                 "ToA ACK RX1 (s)": toa_ack_rx1,
@@ -233,8 +270,15 @@ def estimar_gateways(
             "SF UL": "TOTAL",
             "Distribución": round(sum(distribucion_sf.values()), 3),
             "Nodos": nodos_totales,
-            "Uplinks/hora": round(nodos_totales * mensajes_por_nodo_por_hora, 1),
-            "Payload UL bytes": payload_uplink_bytes,
+            "Uplinks base/hora": round(nodos_totales * mensajes_por_nodo_por_hora, 1),
+            "Uplinks aire/hora": round(
+                nodos_totales
+                * mensajes_por_nodo_por_hora
+                * (1 + confirmed_ratio * (retransmission_factor - 1)),
+                1,
+            ),
+            "Payload app UL": payload_uplink_bytes,
+            "Payload físico UL": payload_fisico_uplink(payload_uplink_bytes, fopts_uplink_bytes),
             "ToA UL (s)": "",
             "ToA UL (ms)": "",
             "Dwell OK UL": "",
@@ -263,6 +307,12 @@ def estimar_gateways(
         "canales_downlink_au915": AU915_DOWNLINK_CHANNELS,
         "tx_chains_downlink_modeladas": AU915_DOWNLINK_TX_CHAINS,
         "airtime_dl_disponible_s_hora": round(airtime_ack_disponible_s_hora, 1),
+        "payload_fisico_uplink_bytes": payload_fisico_uplink(
+            payload_uplink_bytes, fopts_uplink_bytes
+        ),
+        "payload_fisico_ack_bytes": payload_fisico_downlink(
+            ack_payload_bytes, fopts_downlink_bytes
+        ),
     }
 
     return pd.DataFrame(filas), resumen, advertencias
@@ -321,11 +371,11 @@ def app_streamlit():
             help="Frecuencia de transmisión de cada nodo. Subir este valor incrementa linealmente uplinks, ACK y airtime total.",
         )
         payload_ul = st.slider(
-            "Payload uplink (bytes)",
+            "Payload de aplicación uplink (bytes)",
             min_value=1,
             max_value=250,
-            value=11,
-            help="Tamaño del mensaje uplink. Payloads mayores aumentan el Time on Air, reducen capacidad y elevan colisiones.",
+            value=10,
+            help="Solo FRMPayload. El estimador añade automáticamente los 13 bytes mínimos de LoRaWAN.",
         )
         canales_ul = st.number_input(
             "Canales uplink por gateway",
@@ -354,11 +404,11 @@ def app_streamlit():
             help="Porcentaje de uplinks que requieren ACK. 1.0 = todos los mensajes requieren ACK. A mayor valor, mayor carga downlink y bloqueo half-duplex.",
         )
         ack_payload = st.slider(
-            "Payload ACK downlink (bytes)",
+            "Payload de aplicación en ACK/downlink (bytes)",
             min_value=0,
             max_value=20,
             value=0,
-            help="Payload adicional enviado en el downlink ACK. ACK vacíos normalmente usan 0 bytes. Payloads mayores aumentan el airtime downlink.",
+            help="Un ACK vacío usa 0 aquí. El estimador añade automáticamente el paquete LoRaWAN mínimo de 12 bytes.",
         )
         rx2_fallback = st.slider(
             "Fracción de ACK que caen en RX2",
@@ -392,6 +442,21 @@ def app_streamlit():
             0.5,
             help="Representa retransmisiones causadas por pérdida de uplinks o ACK. 1.0 = sin retransmisiones. Valores altos incrementan mucho la carga total.",
         )
+
+        with st.expander("Opciones LoRaWAN avanzadas"):
+            fopts_uplink = st.slider(
+                "FOpts promedio uplink (bytes)", 0, 15, 0,
+                help="Bytes promedio de comandos MAC transportados en FHDR.",
+            )
+            fopts_downlink = st.slider(
+                "FOpts promedio downlink (bytes)", 0, 15, 0,
+                help="Bytes promedio de comandos MAC transportados en el ACK/downlink.",
+            )
+            uplink_dwell_time_enabled = st.toggle(
+                "UplinkDwellTime = 1 (límite 400 ms)",
+                value=True,
+                help="Desactivar solo si la configuración regional/red confirma UplinkDwellTime=0.",
+            )
 
         st.header("Margen final")
         factor_seguridad = st.slider(
@@ -435,6 +500,124 @@ def app_streamlit():
         if not math.isclose(suma_sf, 1.0, abs_tol=1e-6):
             st.warning("La suma de SF no es 1.0. Se normalizará automáticamente para el cálculo.")
 
+    st.divider()
+    st.subheader("Cobertura geográfica y redundancia")
+    coverage_enabled = st.toggle(
+        "Incorporar polígono y cobertura RF",
+        value=False,
+        help="Combina la cantidad requerida por cobertura con el cuello de botella de capacidad.",
+    )
+    coverage_plan = None
+    coverage_geometry = None
+    use_coverage_distribution = False
+
+    if coverage_enabled:
+        st.info(
+            "La planificación propone sitios dentro del polígono con un modelo isotrópico. "
+            "En contenedores debe calibrarse posteriormente con mediciones RSSI/SNR.",
+            icon="🗺️",
+        )
+        geojson_file = st.file_uploader(
+            "Polígono del recinto (GeoJSON)",
+            type=["geojson", "json"],
+            help="Acepta Polygon, MultiPolygon, Feature o FeatureCollection en WGS84.",
+        )
+        environment_name = st.selectbox(
+            "Ambiente RF",
+            list(ENVIRONMENT_PRESETS.keys()),
+            index=list(ENVIRONMENT_PRESETS.keys()).index("Terminal de contenedores"),
+        )
+        environment = ENVIRONMENT_PRESETS[environment_name]
+
+        cov1, cov2, cov3 = st.columns(3)
+        with cov1:
+            redundancy = st.number_input(
+                "Gateways mínimos por punto",
+                min_value=1,
+                max_value=3,
+                value=2,
+                step=1,
+                help="2 exige que cada punto de evaluación sea cubierto por dos gateways distintos.",
+            )
+            target_sf = st.selectbox(
+                "SF máximo de diseño",
+                SF_ORDER,
+                index=3,
+                help="SF10 es una referencia prudente si el dwell time de 400 ms está activo.",
+            )
+        with cov2:
+            tx_eirp = st.number_input("EIRP del dispositivo (dBm)", 0.0, 36.0, 20.0, 1.0)
+            gateway_gain = st.number_input("Ganancia antena gateway (dBi)", 0.0, 15.0, 6.0, 0.5)
+            cable_loss = st.number_input("Pérdidas cable/conectores (dB)", 0.0, 10.0, 2.0, 0.5)
+        with cov3:
+            resolution_m = st.number_input(
+                "Resolución de evaluación (m)", 25.0, 1000.0, 100.0, 25.0
+            )
+            path_loss_exponent = st.number_input(
+                "Exponente de pérdida",
+                1.5,
+                6.0,
+                float(environment["path_loss_exponent"]),
+                0.1,
+            )
+            additional_loss = st.number_input(
+                "Pérdida adicional ambiente (dB)",
+                0.0,
+                50.0,
+                float(environment["additional_loss_db"]),
+                1.0,
+            )
+            fade_margin = st.number_input(
+                "Margen de desvanecimiento (dB)",
+                0.0,
+                40.0,
+                float(environment["fade_margin_db"]),
+                1.0,
+            )
+
+        if geojson_file is not None:
+            try:
+                coverage_geometry = parse_geojson(geojson_file.getvalue())
+                radio_config = RadioConfig(
+                    tx_eirp_dbm=float(tx_eirp),
+                    gateway_gain_dbi=float(gateway_gain),
+                    gateway_cable_loss_db=float(cable_loss),
+                    target_sf=target_sf,
+                    path_loss_exponent=float(path_loss_exponent),
+                    additional_loss_db=float(additional_loss),
+                    fade_margin_db=float(fade_margin),
+                )
+                coverage_plan = plan_coverage(
+                    coverage_geometry,
+                    radio_config,
+                    redundancy=int(redundancy),
+                    resolution_m=float(resolution_m),
+                )
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Superficie", f"{coverage_plan.area_m2 / 1_000_000:.2f} km²")
+                m2.metric("Radio efectivo calculado", f"{coverage_plan.radius_m:.0f} m")
+                m3.metric("Gateways por cobertura", len(coverage_plan.selected_points))
+                m4.metric("Puntos con redundancia", f"{coverage_plan.coverage_fraction:.1%}")
+
+                for warning in coverage_plan.warnings:
+                    st.warning(warning)
+
+                use_coverage_distribution = st.checkbox(
+                    "Usar la distribución SF derivada de la cobertura en el cálculo de capacidad",
+                    value=True,
+                )
+                if use_coverage_distribution:
+                    distribucion = coverage_plan.sf_distribution
+                    st.dataframe(
+                        pd.DataFrame(
+                            [{"SF": sf, "Distribución RF": distribucion[sf]} for sf in SF_ORDER]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+            except Exception as coverage_exc:
+                st.error(f"No fue posible procesar el polígono: {coverage_exc}")
+
     with st.expander("📋 Tabla de mapeo DR AU915 usada por el modelo"):
         tabla_dr = pd.DataFrame(
             {
@@ -462,6 +645,9 @@ def app_streamlit():
             eficiencia_downlink_ack=float(eficiencia_ack),
             max_blocking_rx=float(max_blocking_rx),
             retransmission_factor=float(retransmission_factor),
+            fopts_uplink_bytes=int(fopts_uplink),
+            fopts_downlink_bytes=int(fopts_downlink),
+            uplink_dwell_time_enabled=bool(uplink_dwell_time_enabled),
         )
 
         if advertencias:
@@ -470,11 +656,16 @@ def app_streamlit():
                 st.warning(adv)
 
         st.subheader("Resultado de dimensionamiento")
+        gateways_capacidad = resumen["gateways_recomendados"]
+        gateways_cobertura = (
+            len(coverage_plan.selected_points) if coverage_plan is not None else 0
+        )
+        gateways_finales = max(gateways_capacidad, gateways_cobertura, 1)
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Gateways recomendados", resumen["gateways_recomendados"])
-        c2.metric("Gateways estimados = MAX(cuellos) × seguridad", resumen["gateways_estimados"], help="Se toma el mayor cuello entre uplink, airtime ACK y bloqueo RX, y luego se aplica seguridad.")
-        c3.metric("Cuello de botella", resumen["cuello_botella"])
-        c4.metric("ACK/downlink attempts hora", resumen["ack_attempts_hora_total"])
+        c1.metric("Gateways finales recomendados", gateways_finales)
+        c2.metric("Gateways por capacidad", gateways_capacidad)
+        c3.metric("Gateways por cobertura", gateways_cobertura if coverage_plan else "sin polígono")
+        c4.metric("Condición dominante", "cobertura" if gateways_cobertura > gateways_capacidad else resumen["cuello_botella"])
 
         c5, c6, c7, c8 = st.columns(4)
         c5.metric("Gateways por uplink (cuello uplink)", resumen["gateways_por_uplink"])
@@ -485,6 +676,32 @@ def app_streamlit():
         st.dataframe(df, use_container_width=True)
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Descargar CSV", csv, "estimacion_gateways_au915.csv", "text/csv")
+
+        if coverage_plan is not None and coverage_geometry is not None:
+            st.subheader("Ubicaciones preliminares de gateways")
+            final_sites = augment_gateway_sites(coverage_plan, gateways_finales)
+            lon_lat_sites = points_to_lon_lat(final_sites, coverage_geometry.projection)
+            sites_df = pd.DataFrame(
+                [
+                    {"gateway": f"GW-{index:02d}", "longitude": lon, "latitude": lat}
+                    for index, (lon, lat) in enumerate(lon_lat_sites, start=1)
+                ]
+            )
+            st.map(sites_df, latitude="latitude", longitude="longitude", size=60)
+            st.dataframe(sites_df, use_container_width=True, hide_index=True)
+            sites_geojson = gateway_sites_geojson(final_sites, coverage_geometry.projection)
+            st.download_button(
+                "Descargar sitios propuestos (GeoJSON)",
+                json.dumps(sites_geojson, indent=2),
+                "gateways_propuestos.geojson",
+                "application/geo+json",
+            )
+            st.download_button(
+                "Descargar sitios propuestos (CSV)",
+                sites_df.to_csv(index=False),
+                "gateways_propuestos.csv",
+                "text/csv",
+            )
 
         if plt is not None:
             df_plot = df[df["SF UL"].str.startswith("SF")].copy()
@@ -523,8 +740,10 @@ def app_streamlit():
 
 **ADR ON:** se usan perfiles de distribución SF porque ADR puede mover nodos entre data rates.
 
-**Resultado final:** se toma el mayor cuello de botella entre uplink y ACK/downlink, y luego se aplica seguridad.
+**Resultado final:** se toma el máximo entre capacidad, cobertura geográfica y redundancia.
 
+- Payload físico uplink modelado: **{resumen['payload_fisico_uplink_bytes']} bytes**
+- Payload físico ACK modelado: **{resumen['payload_fisico_ack_bytes']} bytes**
 - Airtime ACK consumido: **{resumen['airtime_ack_total_s_hora']} s/hora**
 - Airtime ACK disponible: **{resumen['airtime_dl_disponible_s_hora']} s/hora**
 - Bloqueo RX total equivalente: **{resumen['blocking_total']}**
