@@ -5,7 +5,11 @@ import unittest
 from zipfile import ZipFile
 
 from coverage_model import (
+    ANTENNA_PRESETS,
+    AntennaConfig,
     RadioConfig,
+    antenna_attenuation_db,
+    augment_gateway_deployments,
     augment_gateway_sites,
     coverage_radius_m,
     gateway_sites_geojson,
@@ -85,6 +89,53 @@ class CoverageModelTests(unittest.TestCase):
         self.assertGreaterEqual(len(plan.selected_points), 2)
         self.assertGreater(plan.coverage_fraction, 0.95)
         self.assertTrue(math.isclose(sum(plan.sf_distribution.values()), 1.0))
+
+    def test_sector_pattern_favors_boresight(self):
+        preset = ANTENNA_PRESETS["Sectorial 60° × 35°"]
+        antenna = AntennaConfig(
+            antenna_type="Sectorial 60° × 35°",
+            gain_dbi=preset["gain_dbi"],
+            horizontal_beamwidth_deg=preset["horizontal_beamwidth_deg"],
+            vertical_beamwidth_deg=preset["vertical_beamwidth_deg"],
+            max_attenuation_db=preset["max_attenuation_db"],
+            downtilt_deg=preset["downtilt_deg"],
+        )
+        gateway = (0.0, 0.0)
+        north = (0.0, 500.0)
+        south = (0.0, -500.0)
+        self.assertLess(
+            antenna_attenuation_db(gateway, north, 0.0, antenna),
+            antenna_attenuation_db(gateway, south, 0.0, antenna),
+        )
+
+    def test_sector_plan_exports_azimuths(self):
+        geometry = parse_geojson(SQUARE)
+        preset = ANTENNA_PRESETS["Sectorial 60° × 35°"]
+        antenna = AntennaConfig(
+            antenna_type="Sectorial 60° × 35°",
+            gain_dbi=preset["gain_dbi"],
+            horizontal_beamwidth_deg=preset["horizontal_beamwidth_deg"],
+            vertical_beamwidth_deg=preset["vertical_beamwidth_deg"],
+            max_attenuation_db=preset["max_attenuation_db"],
+            downtilt_deg=preset["downtilt_deg"],
+        )
+        radio = RadioConfig(gateway_gain_dbi=antenna.gain_dbi)
+        plan = plan_coverage(
+            geometry, radio, antenna=antenna, redundancy=2, resolution_m=150
+        )
+        points, azimuths = augment_gateway_deployments(
+            plan, len(plan.selected_points)
+        )
+        self.assertEqual(len(points), len(azimuths))
+        self.assertTrue(all(0 <= value < 360 for value in azimuths))
+        exported = gateway_sites_geojson(
+            points, geometry.projection, azimuths, antenna
+        )
+        self.assertIn("azimuth_deg", exported["features"][0]["properties"])
+        self.assertEqual(
+            exported["features"][0]["properties"]["antenna_type"],
+            "Sectorial 60° × 35°",
+        )
 
     def test_augment_and_export_sites(self):
         geometry = parse_geojson(SQUARE)

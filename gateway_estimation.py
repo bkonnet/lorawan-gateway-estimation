@@ -4,9 +4,11 @@ import math
 import pandas as pd
 
 from coverage_model import (
+    ANTENNA_PRESETS,
     ENVIRONMENT_PRESETS,
+    AntennaConfig,
     RadioConfig,
-    augment_gateway_sites,
+    augment_gateway_deployments,
     gateway_sites_geojson,
     parse_polygon_file,
     plan_coverage,
@@ -528,8 +530,15 @@ def app_streamlit():
             index=list(ENVIRONMENT_PRESETS.keys()).index("Terminal de contenedores"),
         )
         environment = ENVIRONMENT_PRESETS[environment_name]
+        antenna_name = st.selectbox(
+            "Tipo de antena por gateway",
+            list(ANTENNA_PRESETS.keys()),
+            index=list(ANTENNA_PRESETS.keys()).index("Sectorial 60° × 35°"),
+            help="El modelo considera una antena y un azimut por gateway.",
+        )
+        antenna_preset = ANTENNA_PRESETS[antenna_name]
 
-        cov1, cov2, cov3 = st.columns(3)
+        cov1, cov2, cov3, cov4 = st.columns(4)
         with cov1:
             redundancy = st.number_input(
                 "Gateways mínimos por punto",
@@ -547,12 +556,53 @@ def app_streamlit():
             )
         with cov2:
             tx_eirp = st.number_input("EIRP del dispositivo (dBm)", 0.0, 36.0, 20.0, 1.0)
-            gateway_gain = st.number_input("Ganancia antena gateway (dBi)", 0.0, 15.0, 6.0, 0.5)
+            gateway_gain = st.number_input(
+                "Ganancia máxima de antena (dBi)",
+                0.0,
+                30.0,
+                float(antenna_preset["gain_dbi"]),
+                0.5,
+            )
             cable_loss = st.number_input("Pérdidas cable/conectores (dB)", 0.0, 10.0, 2.0, 0.5)
         with cov3:
+            horizontal_beamwidth = st.number_input(
+                "Haz horizontal HPBW (°)",
+                5.0,
+                360.0,
+                float(antenna_preset["horizontal_beamwidth_deg"]),
+                5.0,
+            )
+            vertical_beamwidth = st.number_input(
+                "Haz vertical HPBW (°)",
+                5.0,
+                180.0,
+                float(antenna_preset["vertical_beamwidth_deg"]),
+                5.0,
+            )
+            max_antenna_attenuation = st.number_input(
+                "Atenuación lateral/trasera máx. (dB)",
+                0.0,
+                50.0,
+                float(antenna_preset["max_attenuation_db"]),
+                1.0,
+            )
+        with cov4:
+            gateway_height = st.number_input("Altura del gateway (m)", 2.0, 100.0, 20.0, 1.0)
+            device_height = st.number_input("Altura del dispositivo (m)", 0.0, 20.0, 1.5, 0.5)
+            downtilt = st.number_input(
+                "Downtilt hacia el suelo (°)",
+                -10.0,
+                45.0,
+                float(antenna_preset["downtilt_deg"]),
+                1.0,
+            )
+
+        rf1, rf2, rf3, rf4 = st.columns(4)
+        with rf1:
             resolution_m = st.number_input(
                 "Resolución de evaluación (m)", 25.0, 1000.0, 100.0, 25.0
             )
+        with rf2:
             path_loss_exponent = st.number_input(
                 "Exponente de pérdida",
                 1.5,
@@ -560,6 +610,7 @@ def app_streamlit():
                 float(environment["path_loss_exponent"]),
                 0.1,
             )
+        with rf3:
             additional_loss = st.number_input(
                 "Pérdida adicional ambiente (dB)",
                 0.0,
@@ -567,6 +618,7 @@ def app_streamlit():
                 float(environment["additional_loss_db"]),
                 1.0,
             )
+        with rf4:
             fade_margin = st.number_input(
                 "Margen de desvanecimiento (dB)",
                 0.0,
@@ -589,20 +641,98 @@ def app_streamlit():
                     additional_loss_db=float(additional_loss),
                     fade_margin_db=float(fade_margin),
                 )
+                antenna_config = AntennaConfig(
+                    antenna_type=antenna_name,
+                    gain_dbi=float(gateway_gain),
+                    horizontal_beamwidth_deg=float(horizontal_beamwidth),
+                    vertical_beamwidth_deg=float(vertical_beamwidth),
+                    max_attenuation_db=float(max_antenna_attenuation),
+                    downtilt_deg=float(downtilt),
+                    gateway_height_m=float(gateway_height),
+                    device_height_m=float(device_height),
+                )
                 coverage_plan = plan_coverage(
                     coverage_geometry,
                     radio_config,
+                    antenna=antenna_config,
                     redundancy=int(redundancy),
                     resolution_m=float(resolution_m),
                 )
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Superficie", f"{coverage_plan.area_m2 / 1_000_000:.2f} km²")
-                m2.metric("Radio efectivo calculado", f"{coverage_plan.radius_m:.0f} m")
+                m2.metric("Radio máximo en boresight", f"{coverage_plan.radius_m:.0f} m")
                 m3.metric("Gateways por cobertura", len(coverage_plan.selected_points))
                 m4.metric("Puntos con redundancia", f"{coverage_plan.coverage_fraction:.1%}")
+                st.caption(
+                    f"Modelo: una antena {antenna_name} por gateway, ganancia {gateway_gain:.1f} dBi, "
+                    f"HPBW {horizontal_beamwidth:.0f}° × {vertical_beamwidth:.0f}° y downtilt {downtilt:.0f}°."
+                )
 
                 for warning in coverage_plan.warnings:
                     st.warning(warning)
+
+                with st.expander("Comparar perfiles de antena en este polígono"):
+                    st.caption(
+                        "La comparación mantiene ambiente, redundancia, EIRP, alturas y resolución. "
+                        "Cada perfil usa su ganancia, HPBW y downtilt iniciales."
+                    )
+                    comparison_rows = []
+                    for comparison_name in (
+                        "Omnidireccional",
+                        "Sectorial 60° × 35°",
+                        "Direccional 30° × 30°",
+                    ):
+                        comparison_preset = ANTENNA_PRESETS[comparison_name]
+                        comparison_antenna = AntennaConfig(
+                            antenna_type=comparison_name,
+                            gain_dbi=float(comparison_preset["gain_dbi"]),
+                            horizontal_beamwidth_deg=float(
+                                comparison_preset["horizontal_beamwidth_deg"]
+                            ),
+                            vertical_beamwidth_deg=float(
+                                comparison_preset["vertical_beamwidth_deg"]
+                            ),
+                            max_attenuation_db=float(
+                                comparison_preset["max_attenuation_db"]
+                            ),
+                            downtilt_deg=float(comparison_preset["downtilt_deg"]),
+                            gateway_height_m=float(gateway_height),
+                            device_height_m=float(device_height),
+                        )
+                        comparison_radio = RadioConfig(
+                            tx_eirp_dbm=float(tx_eirp),
+                            gateway_gain_dbi=comparison_antenna.gain_dbi,
+                            gateway_cable_loss_db=float(cable_loss),
+                            target_sf=target_sf,
+                            path_loss_exponent=float(path_loss_exponent),
+                            additional_loss_db=float(additional_loss),
+                            fade_margin_db=float(fade_margin),
+                        )
+                        comparison_plan = plan_coverage(
+                            coverage_geometry,
+                            comparison_radio,
+                            antenna=comparison_antenna,
+                            redundancy=int(redundancy),
+                            resolution_m=float(resolution_m),
+                        )
+                        comparison_rows.append(
+                            {
+                                "Antena": comparison_name,
+                                "Ganancia (dBi)": comparison_antenna.gain_dbi,
+                                "HPBW H × V": (
+                                    f"{comparison_antenna.horizontal_beamwidth_deg:.0f}° × "
+                                    f"{comparison_antenna.vertical_beamwidth_deg:.0f}°"
+                                ),
+                                "Radio boresight (m)": round(comparison_plan.radius_m),
+                                "Gateways cobertura": len(comparison_plan.selected_points),
+                                "Redundancia lograda": f"{comparison_plan.coverage_fraction:.1%}",
+                            }
+                        )
+                    st.dataframe(
+                        pd.DataFrame(comparison_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
                 use_coverage_distribution = st.checkbox(
                     "Usar la distribución SF derivada de la cobertura en el cálculo de capacidad",
@@ -681,17 +811,76 @@ def app_streamlit():
 
         if coverage_plan is not None and coverage_geometry is not None:
             st.subheader("Ubicaciones preliminares de gateways")
-            final_sites = augment_gateway_sites(coverage_plan, gateways_finales)
+            final_sites, final_azimuths = augment_gateway_deployments(
+                coverage_plan, gateways_finales
+            )
             lon_lat_sites = points_to_lon_lat(final_sites, coverage_geometry.projection)
             sites_df = pd.DataFrame(
                 [
-                    {"gateway": f"GW-{index:02d}", "longitude": lon, "latitude": lat}
+                    {
+                        "gateway": f"GW-{index:02d}",
+                        "longitude": lon,
+                        "latitude": lat,
+                        "antena": coverage_plan.antenna_config.antenna_type,
+                        "ganancia_dbi": coverage_plan.antenna_config.gain_dbi,
+                        "azimuth_deg": round(final_azimuths[index - 1], 1),
+                        "downtilt_deg": coverage_plan.antenna_config.downtilt_deg,
+                    }
                     for index, (lon, lat) in enumerate(lon_lat_sites, start=1)
                 ]
             )
             st.map(sites_df, latitude="latitude", longitude="longitude", size=60)
             st.dataframe(sites_df, use_container_width=True, hide_index=True)
-            sites_geojson = gateway_sites_geojson(final_sites, coverage_geometry.projection)
+            if plt is not None:
+                fig_cov, ax_cov = plt.subplots(figsize=(9, 7))
+                for polygon in coverage_geometry.polygons:
+                    for ring_index, ring in enumerate(polygon):
+                        xs = [point[0] for point in ring]
+                        ys = [point[1] for point in ring]
+                        ax_cov.plot(
+                            xs,
+                            ys,
+                            color="black" if ring_index == 0 else "gray",
+                            linewidth=1.5,
+                        )
+                ax_cov.scatter(
+                    [point[0] for point in final_sites],
+                    [point[1] for point in final_sites],
+                    color="tab:red",
+                    marker="^",
+                    s=70,
+                    label="Gateway",
+                )
+                if not coverage_plan.antenna_config.is_omnidirectional:
+                    arrow_length = coverage_plan.radius_m * 0.28
+                    for point, azimuth in zip(final_sites, final_azimuths):
+                        azimuth_rad = math.radians(azimuth)
+                        ax_cov.arrow(
+                            point[0],
+                            point[1],
+                            math.sin(azimuth_rad) * arrow_length,
+                            math.cos(azimuth_rad) * arrow_length,
+                            width=max(coverage_plan.radius_m * 0.006, 1),
+                            head_width=max(coverage_plan.radius_m * 0.04, 5),
+                            color="tab:red",
+                            alpha=0.65,
+                            length_includes_head=True,
+                        )
+                ax_cov.set_aspect("equal", adjustable="box")
+                ax_cov.set_title("Polígono y orientación preliminar de antenas")
+                ax_cov.set_xlabel("Este local (m)")
+                ax_cov.set_ylabel("Norte local (m)")
+                ax_cov.grid(True, alpha=0.25)
+                ax_cov.legend()
+                st.pyplot(fig_cov)
+                plt.close(fig_cov)
+
+            sites_geojson = gateway_sites_geojson(
+                final_sites,
+                coverage_geometry.projection,
+                final_azimuths,
+                coverage_plan.antenna_config,
+            )
             st.download_button(
                 "Descargar sitios propuestos (GeoJSON)",
                 json.dumps(sites_geojson, indent=2),

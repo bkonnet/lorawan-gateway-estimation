@@ -24,6 +24,7 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Carga directa de KMZ/KML de Google Earth o polígonos GeoJSON.
 - Planificación con redundancia de 1 a 3 gateways por punto.
 - Perfil RF ajustable para terminales de contenedores.
+- Antenas omnidireccionales, sectoriales y direccionales con ganancia, HPBW, azimut y downtilt.
 - Distribución SF derivada del link budget y la geometría.
 - Exportación de ubicaciones preliminares en CSV y GeoJSON.
 - Exportación de resultados a CSV.
@@ -269,14 +270,32 @@ Los presets definen valores iniciales de exponente de pérdida, pérdida adicion
 
 El campo **Gateways mínimos por punto** exige que cada punto de la cuadrícula esté dentro del radio estimado de 1, 2 o 3 gateways distintos. Para una red crítica se recomienda comenzar con 2.
 
+### Antenas y orientación
+
+Cada gateway se modela con una antena. La aplicación incluye estos perfiles iniciales:
+
+| Perfil | Ganancia inicial | HPBW horizontal | HPBW vertical |
+|---|---:|---:|---:|
+| Omnidireccional | 6 dBi | 360° | 30° |
+| Sectorial | 12 dBi | 60° | 35° |
+| Direccional | 15 dBi | 30° | 30° |
+| Personalizada | editable | editable | editable |
+
+También se configuran altura del gateway, altura del dispositivo, downtilt y atenuación lateral/trasera. Para antenas sectoriales y direccionales, el planificador evalúa diferentes azimuts y exporta la orientación propuesta para cada gateway.
+
+El radio mostrado es el máximo en el eje principal o *boresight*. Fuera de ese eje se aplica una atenuación aproximada basada en las anchuras de haz horizontal y vertical. Una antena de mayor ganancia puede aumentar el alcance frontal y, al mismo tiempo, aumentar la cantidad de gateways necesaria para cubrir un polígono completo si su haz es estrecho.
+
+Los valores deben reemplazarse por la ficha técnica o, idealmente, por los patrones de radiación medidos del modelo de antena seleccionado. El cálculo supone una antena sectorial/direccional por gateway; varias sectoriales conectadas a un único concentrador requieren modelar además splitters, combinadores, aislamiento y pérdidas de inserción.
+
 ### Algoritmo
 
 1. Proyecta el GeoJSON a un plano local.
 2. Calcula un radio efectivo mediante link budget y un modelo log-distance.
 3. Muestrea el polígono en una cuadrícula configurable.
-4. Selecciona ubicaciones preliminares mediante un algoritmo greedy multi-cover.
-5. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
-6. Calcula el resultado final como el máximo entre capacidad y cobertura.
+4. Aplica el patrón horizontal/vertical, altura y downtilt de la antena.
+5. Selecciona ubicaciones y azimuts preliminares mediante un algoritmo greedy multi-cover.
+6. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
+7. Calcula el resultado final como el máximo entre capacidad y cobertura.
 
 ```text
 Gateways finales = MAX(gateways por capacidad, gateways por cobertura)

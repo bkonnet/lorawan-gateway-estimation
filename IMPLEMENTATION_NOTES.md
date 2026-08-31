@@ -36,6 +36,14 @@ El algoritmo selecciona puntos matemáticos dentro del polígono. Antes de adopt
 
 Si existe una lista real de postes o edificios candidatos, el siguiente paso recomendado es reemplazar la cuadrícula automática por esa lista y ejecutar el mismo algoritmo multi-cover sobre sitios instalables.
 
+## Modelo de antena
+
+El patrón usa una aproximación cuadrática del lóbulo principal en azimut y elevación. La atenuación alcanza 3 dB en el borde de la anchura de haz de media potencia (HPBW) y se limita por la atenuación lateral/trasera configurada. La elevación considera la diferencia de altura entre gateway y dispositivo y el downtilt.
+
+Para cada ubicación sectorial o direccional se evalúan varios azimuts. Cada selección representa un gateway con una antena. Los azimuts aparecen en la tabla y en las exportaciones CSV/GeoJSON.
+
+Esta aproximación permite comparar arquitecturas, pero no reemplaza el patrón 3D del fabricante. Estructuras metálicas cercanas, mástiles, cables, radomos y la propia torre pueden deformar el patrón.
+
 ## Calibración recomendada
 
 Recolectar para cada prueba:
