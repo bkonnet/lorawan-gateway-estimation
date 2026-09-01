@@ -1,10 +1,12 @@
 import unittest
 
 from gateway_estimation import (
+    antenna_preset_input_state,
     calcular_toa,
     capture_estimation_input_state,
     distribucion_por_dr_fijo,
     estimar_gateways,
+    environment_preset_input_state,
     payload_fisico_downlink,
     payload_fisico_uplink,
     restorable_input_state,
@@ -79,6 +81,24 @@ class GatewayEstimationTests(unittest.TestCase):
         self.assertEqual(restored["input_nodes"], 4000)
         self.assertEqual(restored["input_confirmed_ratio"], 0.25)
         self.assertTrue(restored["input_coverage_enabled"])
+
+    def test_antenna_preset_updates_all_owned_rf_controls(self):
+        omni = antenna_preset_input_state("Omnidireccional")
+        sector = antenna_preset_input_state("Sectorial 60° × 35°")
+        directional = antenna_preset_input_state("Direccional 30° × 30°")
+        self.assertEqual(omni["input_horizontal_beamwidth"], 360.0)
+        self.assertEqual(sector["input_horizontal_beamwidth"], 60.0)
+        self.assertEqual(directional["input_horizontal_beamwidth"], 30.0)
+        self.assertGreater(
+            directional["input_gateway_gain"], omni["input_gateway_gain"]
+        )
+
+    def test_environment_preset_updates_propagation_controls(self):
+        container = environment_preset_input_state("Terminal de contenedores")
+        open_area = environment_preset_input_state("Área abierta")
+        self.assertGreater(
+            container["input_additional_loss"], open_area["input_additional_loss"]
+        )
 
 
 if __name__ == "__main__":

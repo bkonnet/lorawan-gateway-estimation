@@ -190,6 +190,28 @@ def restorable_input_state(snapshot: dict) -> dict:
     return migrated
 
 
+def antenna_preset_input_state(antenna_name: str) -> dict:
+    """Map an antenna preset to every RF control that it owns."""
+    preset = ANTENNA_PRESETS[antenna_name]
+    return {
+        "input_gateway_gain": float(preset["gain_dbi"]),
+        "input_horizontal_beamwidth": float(preset["horizontal_beamwidth_deg"]),
+        "input_vertical_beamwidth": float(preset["vertical_beamwidth_deg"]),
+        "input_max_antenna_attenuation": float(preset["max_attenuation_db"]),
+        "input_downtilt": float(preset["downtilt_deg"]),
+    }
+
+
+def environment_preset_input_state(environment_name: str) -> dict:
+    """Map an environment preset to its propagation controls."""
+    preset = ENVIRONMENT_PRESETS[environment_name]
+    return {
+        "input_path_loss_exponent": float(preset["path_loss_exponent"]),
+        "input_additional_loss": float(preset["additional_loss_db"]),
+        "input_fade_margin": float(preset["fade_margin_db"]),
+    }
+
+
 def calcular_toa(sf: int, payload_bytes: int, bw: int = 125_000) -> float:
     """Calcula Time on Air aproximado para LoRa, CR=4/5, header explícito, CRC on, preámbulo 8."""
     cr = 1
@@ -720,18 +742,35 @@ def app_streamlit():
         else:
             polygon_name = None
             polygon_bytes = None
+        def environment_preset_changed():
+            environment_state = environment_preset_input_state(
+                st.session_state["input_environment"]
+            )
+            for key, value in environment_state.items():
+                st.session_state[key] = value
+
         environment_name = st.selectbox(
             "Ambiente RF",
             list(ENVIRONMENT_PRESETS.keys()),
             index=list(ENVIRONMENT_PRESETS.keys()).index("Terminal de contenedores"),
             key="input_environment",
+            on_change=environment_preset_changed,
         )
         environment = ENVIRONMENT_PRESETS[environment_name]
+
+        def antenna_preset_changed():
+            antenna_state = antenna_preset_input_state(
+                st.session_state["input_antenna"]
+            )
+            for key, value in antenna_state.items():
+                st.session_state[key] = value
+
         antenna_name = st.selectbox(
             "Tipo de antena por gateway",
             list(ANTENNA_PRESETS.keys()),
             index=list(ANTENNA_PRESETS.keys()).index("Sectorial 60° × 35°"),
             key="input_antenna",
+            on_change=antenna_preset_changed,
             help="El modelo considera una antena y un azimut por gateway.",
         )
         antenna_preset = ANTENNA_PRESETS[antenna_name]

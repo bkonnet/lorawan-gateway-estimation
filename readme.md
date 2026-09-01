@@ -27,6 +27,7 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Separación mínima configurable entre sitios y distribución espacial de gateways añadidos por capacidad.
 - Perfil RF ajustable para terminales de contenedores.
 - Antenas omnidireccionales, sectoriales y direccionales con ganancia, HPBW, azimut y downtilt.
+- Cambio de preset de antena sincronizado automáticamente con ganancia, HPBW, atenuación y downtilt.
 - Orientación automática de antenas direccionales según cobertura y margen RF útil dentro del polígono.
 - Flechas de orientación recortadas al primer límite del área para evitar representaciones engañosas.
 - Huellas circulares para antenas omnidireccionales y conos HPBW para antenas direccionales.
