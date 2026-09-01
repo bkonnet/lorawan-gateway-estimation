@@ -127,6 +127,7 @@ class CoverageModelTests(unittest.TestCase):
             plan, len(plan.selected_points)
         )
         self.assertEqual(len(points), len(azimuths))
+        self.assertEqual(len(points), len(set(points)))
         self.assertTrue(all(0 <= value < 360 for value in azimuths))
         exported = gateway_sites_geojson(
             points, geometry.projection, azimuths, antenna
@@ -136,6 +137,54 @@ class CoverageModelTests(unittest.TestCase):
             exported["features"][0]["properties"]["antenna_type"],
             "Sectorial 60° × 35°",
         )
+
+    def test_sector_redundancy_uses_distinct_physical_sites(self):
+        geometry = parse_geojson(SQUARE)
+        preset = ANTENNA_PRESETS["Sectorial 60° × 35°"]
+        antenna = AntennaConfig(
+            antenna_type="Sectorial 60° × 35°",
+            gain_dbi=preset["gain_dbi"],
+            horizontal_beamwidth_deg=preset["horizontal_beamwidth_deg"],
+            vertical_beamwidth_deg=preset["vertical_beamwidth_deg"],
+            max_attenuation_db=preset["max_attenuation_db"],
+            downtilt_deg=preset["downtilt_deg"],
+        )
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(gateway_gain_dbi=antenna.gain_dbi),
+            antenna=antenna,
+            redundancy=2,
+            resolution_m=100,
+            minimum_site_separation_m=150,
+        )
+        self.assertEqual(len(plan.selected_points), len(set(plan.selected_points)))
+        for index, first in enumerate(plan.selected_points):
+            for second in plan.selected_points[index + 1 :]:
+                self.assertGreaterEqual(math.dist(first, second), 150)
+
+    def test_capacity_augmentation_never_colocates_gateways(self):
+        geometry = parse_geojson(SQUARE)
+        preset = ANTENNA_PRESETS["Sectorial 60° × 35°"]
+        antenna = AntennaConfig(
+            antenna_type="Sectorial 60° × 35°",
+            gain_dbi=preset["gain_dbi"],
+            horizontal_beamwidth_deg=preset["horizontal_beamwidth_deg"],
+            vertical_beamwidth_deg=preset["vertical_beamwidth_deg"],
+            max_attenuation_db=preset["max_attenuation_db"],
+        )
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(gateway_gain_dbi=antenna.gain_dbi),
+            antenna=antenna,
+            redundancy=1,
+            resolution_m=100,
+            minimum_site_separation_m=125,
+        )
+        points, _ = augment_gateway_deployments(plan, 8)
+        self.assertEqual(len(points), len(set(points)))
+        for index, first in enumerate(points):
+            for second in points[index + 1 :]:
+                self.assertGreaterEqual(math.dist(first, second), 125)
 
     def test_augment_and_export_sites(self):
         geometry = parse_geojson(SQUARE)

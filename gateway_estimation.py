@@ -611,6 +611,14 @@ def app_streamlit():
             resolution_m = st.number_input(
                 "Resolución de evaluación (m)", 25.0, 1000.0, 100.0, 25.0
             )
+            minimum_site_separation = st.number_input(
+                "Separación mínima entre sitios (m)",
+                0.0,
+                5000.0,
+                100.0,
+                25.0,
+                help="Impide que distintas orientaciones en una misma coordenada se contabilicen como gateways redundantes. También distribuye los gateways añadidos por capacidad.",
+            )
         with rf2:
             path_loss_exponent = st.number_input(
                 "Exponente de pérdida",
@@ -666,6 +674,7 @@ def app_streamlit():
                     antenna=antenna_config,
                     redundancy=int(redundancy),
                     resolution_m=float(resolution_m),
+                    minimum_site_separation_m=float(minimum_site_separation),
                 )
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Superficie", f"{coverage_plan.area_m2 / 1_000_000:.2f} km²")
@@ -723,6 +732,7 @@ def app_streamlit():
                             antenna=comparison_antenna,
                             redundancy=int(redundancy),
                             resolution_m=float(resolution_m),
+                            minimum_site_separation_m=float(minimum_site_separation),
                         )
                         comparison_rows.append(
                             {
@@ -824,6 +834,13 @@ def app_streamlit():
             final_sites, final_azimuths = augment_gateway_deployments(
                 coverage_plan, gateways_finales
             )
+            if len(final_sites) < gateways_finales:
+                st.warning(
+                    f"El modelo requiere {gateways_finales} gateways, pero solo pudo ubicar "
+                    f"{len(final_sites)} sitios distintos respetando una separación mínima de "
+                    f"{minimum_site_separation:.0f} m. Reduzca la separación, aumente la "
+                    "resolución espacial de candidatos o habilite ubicaciones adicionales."
+                )
             lon_lat_sites = points_to_lon_lat(final_sites, coverage_geometry.projection)
             sites_df = pd.DataFrame(
                 [
@@ -957,6 +974,7 @@ def app_streamlit():
                 "Superficie": f"{coverage_plan.area_m2 / 1_000_000:.3f} km2",
                 "Ambiente RF": environment_name,
                 "Redundancia requerida": int(redundancy),
+                "Separación mínima entre sitios": f"{minimum_site_separation:.0f} m",
                 "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
                 "SF máximo de diseño": target_sf,
                 "Radio máximo en boresight": f"{coverage_plan.radius_m:.0f} m",

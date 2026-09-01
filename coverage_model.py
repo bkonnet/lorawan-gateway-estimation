@@ -171,6 +171,8 @@ class CoveragePlan:
     evaluation_points: list[tuple[float, float]]
     candidate_points: list[tuple[float, float]]
     candidate_azimuths_deg: list[float]
+    candidate_site_ids: list[int]
+    candidate_coverage_counts: list[int]
     selected_indices: list[int]
     redundancy: int
     coverage_fraction: float
@@ -178,6 +180,7 @@ class CoveragePlan:
     sf_distribution: dict[str, float]
     warnings: list[str]
     antenna_config: AntennaConfig
+    minimum_site_separation_m: float
 
     @property
     def selected_points(self) -> list[tuple[float, float]]:
@@ -527,8 +530,11 @@ def _coverage_sets(
 
 def _greedy_multicover(
     coverage_sets: list[list[int]],
+    candidate_points: list[tuple[float, float]],
+    candidate_site_ids: list[int],
     point_count: int,
     redundancy: int,
+    minimum_site_separation_m: float,
 ) -> tuple[list[int], list[int]]:
     remaining = [redundancy] * point_count
     selected: list[int] = []
@@ -545,7 +551,20 @@ def _greedy_multicover(
         if score == 0:
             break
         selected.append(best)
-        available.remove(best)
+        selected_site = candidate_site_ids[best]
+        selected_point = candidate_points[best]
+        blocked_sites = {
+            candidate_site_ids[index]
+            for index in available
+            if candidate_site_ids[index] == selected_site
+            or math.dist(candidate_points[index], selected_point)
+            < minimum_site_separation_m
+        }
+        available = {
+            index
+            for index in available
+            if candidate_site_ids[index] not in blocked_sites
+        }
         for point_index in coverage_sets[best]:
             if remaining[point_index] > 0:
                 remaining[point_index] -= 1
@@ -591,17 +610,47 @@ def _derive_sf_distribution(
     return {sf: count / total for sf, count in counts.items()}
 
 
+def _spread_sample_points(
+    points: list[tuple[float, float]], max_count: int
+) -> list[tuple[float, float]]:
+    """Limit candidate sites while preserving geographic dispersion."""
+    unique_points = list(dict.fromkeys(points))
+    if len(unique_points) <= max_count:
+        return unique_points
+
+    center = (
+        sum(point[0] for point in unique_points) / len(unique_points),
+        sum(point[1] for point in unique_points) / len(unique_points),
+    )
+    first = min(range(len(unique_points)), key=lambda index: math.dist(unique_points[index], center))
+    selected = [first]
+    available = set(range(len(unique_points))) - {first}
+    while available and len(selected) < max_count:
+        best = max(
+            available,
+            key=lambda index: min(
+                math.dist(unique_points[index], unique_points[chosen])
+                for chosen in selected
+            ),
+        )
+        selected.append(best)
+        available.remove(best)
+    return [unique_points[index] for index in selected]
+
+
 def plan_coverage(
     geometry: ProjectedGeometry,
     config: RadioConfig,
     antenna: AntennaConfig | None = None,
     redundancy: int = 2,
     resolution_m: float = 100.0,
+    minimum_site_separation_m: float = 100.0,
     max_evaluation_points: int = 3_000,
     max_candidate_points: int = 1_500,
 ) -> CoveragePlan:
     antenna = antenna or AntennaConfig(gain_dbi=config.gateway_gain_dbi)
     redundancy = min(max(int(redundancy), 1), 3)
+    minimum_site_separation_m = max(float(minimum_site_separation_m), 0.0)
     radius_m = coverage_radius_m(config)
     evaluation_points, effective_resolution = _grid_points(
         geometry, resolution_m, max_evaluation_points
@@ -612,18 +661,19 @@ def plan_coverage(
     base_candidate_points, _ = _grid_points(
         geometry, candidate_spacing, max_base_candidates
     )
+    physical_candidate_points = _spread_sample_points(
+        base_candidate_points + evaluation_points,
+        max_base_candidates,
+    )
 
     candidate_points = []
     candidate_azimuths_deg = []
-    for point in base_candidate_points:
+    candidate_site_ids = []
+    for site_id, point in enumerate(physical_candidate_points):
         for azimuth in azimuth_options:
             candidate_points.append(point)
             candidate_azimuths_deg.append(azimuth)
-
-    # Evaluation points are valid fallback sites and improve boundary coverage.
-    if len(candidate_points) < 3:
-        candidate_points = list(dict.fromkeys(candidate_points + evaluation_points))
-        candidate_azimuths_deg = [0.0] * len(candidate_points)
+            candidate_site_ids.append(site_id)
 
     coverage_sets = _coverage_sets(
         candidate_points,
@@ -634,7 +684,12 @@ def plan_coverage(
         antenna,
     )
     selected_indices, remaining = _greedy_multicover(
-        coverage_sets, len(evaluation_points), redundancy
+        coverage_sets,
+        candidate_points,
+        candidate_site_ids,
+        len(evaluation_points),
+        redundancy,
+        minimum_site_separation_m,
     )
     covered = sum(1 for value in remaining if value == 0)
     coverage_fraction = covered / len(evaluation_points)
@@ -666,6 +721,8 @@ def plan_coverage(
         evaluation_points=evaluation_points,
         candidate_points=candidate_points,
         candidate_azimuths_deg=candidate_azimuths_deg,
+        candidate_site_ids=candidate_site_ids,
+        candidate_coverage_counts=[len(items) for items in coverage_sets],
         selected_indices=selected_indices,
         redundancy=redundancy,
         coverage_fraction=coverage_fraction,
@@ -673,28 +730,14 @@ def plan_coverage(
         sf_distribution=sf_distribution,
         warnings=warnings,
         antenna_config=antenna,
+        minimum_site_separation_m=minimum_site_separation_m,
     )
 
 
 def augment_gateway_sites(plan: CoveragePlan, target_count: int) -> list[tuple[float, float]]:
     """Add well-separated candidate sites when capacity exceeds coverage count."""
-    selected = list(plan.selected_indices)
-    available = set(range(len(plan.candidate_points))) - set(selected)
-    target_count = min(max(target_count, len(selected)), len(plan.candidate_points))
-    while len(selected) < target_count and available:
-        if selected:
-            best = max(
-                available,
-                key=lambda index: min(
-                    math.dist(plan.candidate_points[index], plan.candidate_points[chosen])
-                    for chosen in selected
-                ),
-            )
-        else:
-            best = next(iter(available))
-        selected.append(best)
-        available.remove(best)
-    return [plan.candidate_points[index] for index in selected]
+    points, _ = augment_gateway_deployments(plan, target_count)
+    return points
 
 
 def augment_gateway_deployments(
@@ -702,21 +745,48 @@ def augment_gateway_deployments(
 ) -> tuple[list[tuple[float, float]], list[float]]:
     """Return points and antenna azimuths for the final capacity/coverage count."""
     selected = list(plan.selected_indices)
-    available = set(range(len(plan.candidate_points))) - set(selected)
-    target_count = min(max(target_count, len(selected)), len(plan.candidate_points))
-    while len(selected) < target_count and available:
+    selected_site_ids = {plan.candidate_site_ids[index] for index in selected}
+    candidates_by_site: dict[int, list[int]] = {}
+    for index, site_id in enumerate(plan.candidate_site_ids):
+        candidates_by_site.setdefault(site_id, []).append(index)
+
+    available_sites = set(candidates_by_site) - selected_site_ids
+    target_count = min(max(target_count, len(selected)), len(candidates_by_site))
+    while len(selected) < target_count and available_sites:
+        eligible_sites = {
+            site_id
+            for site_id in available_sites
+            if all(
+                math.dist(
+                    plan.candidate_points[candidates_by_site[site_id][0]],
+                    plan.candidate_points[chosen],
+                )
+                >= plan.minimum_site_separation_m
+                for chosen in selected
+            )
+        }
+        if not eligible_sites:
+            break
         if selected:
-            best = max(
-                available,
-                key=lambda index: min(
-                    math.dist(plan.candidate_points[index], plan.candidate_points[chosen])
+            best_site = max(
+                eligible_sites,
+                key=lambda site_id: min(
+                    math.dist(
+                        plan.candidate_points[candidates_by_site[site_id][0]],
+                        plan.candidate_points[chosen],
+                    )
                     for chosen in selected
                 ),
             )
         else:
-            best = next(iter(available))
+            best_site = next(iter(eligible_sites))
+        best = max(
+            candidates_by_site[best_site],
+            key=lambda index: plan.candidate_coverage_counts[index],
+        )
         selected.append(best)
-        available.remove(best)
+        selected_site_ids.add(best_site)
+        available_sites.remove(best_site)
     return (
         [plan.candidate_points[index] for index in selected],
         [plan.candidate_azimuths_deg[index] for index in selected],

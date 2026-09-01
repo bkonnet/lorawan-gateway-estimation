@@ -23,6 +23,8 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Perfil operativo **Terminal Contenedores**.
 - Carga directa de KMZ/KML de Google Earth o polígonos GeoJSON.
 - Planificación con redundancia de 1 a 3 gateways por punto.
+- Redundancia basada en sitios físicos distintos, sin contar sectores colocalizados como gateways independientes.
+- Separación mínima configurable entre sitios y distribución espacial de gateways añadidos por capacidad.
 - Perfil RF ajustable para terminales de contenedores.
 - Antenas omnidireccionales, sectoriales y direccionales con ganancia, HPBW, azimut y downtilt.
 - Distribución SF derivada del link budget y la geometría.
