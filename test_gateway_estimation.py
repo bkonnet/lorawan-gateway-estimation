@@ -2,10 +2,12 @@ import unittest
 
 from gateway_estimation import (
     calcular_toa,
+    capture_estimation_input_state,
     distribucion_por_dr_fijo,
     estimar_gateways,
     payload_fisico_downlink,
     payload_fisico_uplink,
+    restorable_input_state,
 )
 
 
@@ -49,6 +51,34 @@ class GatewayEstimationTests(unittest.TestCase):
         retried = self._estimate(confirmed_ratio=0.0, retransmission_factor=3.0)
         self.assertEqual(retried["gateways_por_uplink"], base["gateways_por_uplink"])
         self.assertEqual(retried["ack_attempts_hora_total"], 0)
+
+    def test_saved_estimation_restores_complete_widget_state(self):
+        state = {
+            "input_nodes": 4200,
+            "input_payload_ul": 4,
+            "input_coverage_enabled": True,
+            "input_antenna": "Sectorial 60° × 35°",
+            "unrelated_key": "ignore",
+        }
+        captured = capture_estimation_input_state(state)
+        self.assertNotIn("unrelated_key", captured)
+        restored = restorable_input_state({"input_state": captured})
+        self.assertEqual(restored, captured)
+
+    def test_legacy_saved_estimation_is_partially_migrated(self):
+        snapshot = {
+            "parameters": {
+                "Perfil operativo": "Terminal Contenedores",
+                "Nodos totales": 4000,
+                "Uplinks confirmados": "25.0%",
+                "ADR": "Deshabilitado",
+            },
+            "coverage": {"Ambiente RF": "Terminal de contenedores"},
+        }
+        restored = restorable_input_state(snapshot)
+        self.assertEqual(restored["input_nodes"], 4000)
+        self.assertEqual(restored["input_confirmed_ratio"], 0.25)
+        self.assertTrue(restored["input_coverage_enabled"])
 
 
 if __name__ == "__main__":

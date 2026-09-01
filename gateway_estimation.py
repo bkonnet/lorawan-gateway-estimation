@@ -1,3 +1,4 @@
+import base64
 import json
 import math
 from datetime import datetime
@@ -81,6 +82,112 @@ AU915_DOWNLINK_CHANNELS = 8
 AU915_DOWNLINK_TX_CHAINS = 1
 AU915_RX2_SF = 12
 AU915_DWELL_TIME_MS = 400
+
+ESTIMATION_WIDGET_KEYS = (
+    "input_profile",
+    "input_nodes",
+    "input_messages_hour",
+    "input_payload_ul",
+    "input_uplink_channels",
+    "input_aloha_efficiency",
+    "input_confirmed_ratio",
+    "input_ack_payload",
+    "input_rx2_ratio",
+    "input_ack_efficiency",
+    "input_max_blocking",
+    "input_retransmission_factor",
+    "input_fopts_uplink",
+    "input_fopts_downlink",
+    "input_uplink_dwell",
+    "input_safety_factor",
+    "input_adr_enabled",
+    "input_fixed_dr",
+    "input_adr_profile",
+    "input_edit_sf",
+    "input_sf_SF7",
+    "input_sf_SF8",
+    "input_sf_SF9",
+    "input_sf_SF10",
+    "input_sf_SF11",
+    "input_sf_SF12",
+    "input_coverage_enabled",
+    "input_environment",
+    "input_antenna",
+    "input_redundancy",
+    "input_target_sf",
+    "input_tx_eirp",
+    "input_gateway_gain",
+    "input_cable_loss",
+    "input_horizontal_beamwidth",
+    "input_vertical_beamwidth",
+    "input_max_antenna_attenuation",
+    "input_gateway_height",
+    "input_device_height",
+    "input_downtilt",
+    "input_resolution",
+    "input_minimum_site_separation",
+    "input_path_loss_exponent",
+    "input_additional_loss",
+    "input_fade_margin",
+    "input_strategy",
+    "input_edge_priority",
+    "input_dispersion_weight",
+    "input_use_coverage_distribution",
+)
+
+
+def capture_estimation_input_state(state) -> dict:
+    """Capture every restorable model control from Streamlit session state."""
+    return {
+        key: state[key]
+        for key in ESTIMATION_WIDGET_KEYS
+        if key in state
+    }
+
+
+def restorable_input_state(snapshot: dict) -> dict:
+    """Return current-format inputs, with a small migration for legacy snapshots."""
+    stored = snapshot.get("input_state")
+    if isinstance(stored, dict) and stored:
+        return {
+            key: value
+            for key, value in stored.items()
+            if key in ESTIMATION_WIDGET_KEYS
+        }
+
+    parameters = snapshot.get("parameters") or {}
+    coverage = snapshot.get("coverage") or {}
+
+    def percent(value):
+        if isinstance(value, str) and value.endswith("%"):
+            return float(value[:-1]) / 100
+        return float(value)
+
+    migrated = {}
+    legacy_mapping = {
+        "Nodos totales": "input_nodes",
+        "Mensajes por nodo por hora": "input_messages_hour",
+        "Payload aplicación uplink (bytes)": "input_payload_ul",
+        "Canales uplink por gateway": "input_uplink_channels",
+        "Eficiencia ALOHA uplink": "input_aloha_efficiency",
+        "Payload aplicación ACK (bytes)": "input_ack_payload",
+        "Factor retransmisiones": "input_retransmission_factor",
+        "Factor de seguridad": "input_safety_factor",
+    }
+    for label, key in legacy_mapping.items():
+        if label in parameters:
+            migrated[key] = parameters[label]
+    if "Perfil operativo" in parameters:
+        migrated["input_profile"] = parameters["Perfil operativo"]
+    if "ADR" in parameters:
+        migrated["input_adr_enabled"] = parameters["ADR"] == "Habilitado"
+    if "Uplinks confirmados" in parameters:
+        migrated["input_confirmed_ratio"] = percent(parameters["Uplinks confirmados"])
+    if "ACK en RX2" in parameters:
+        migrated["input_rx2_ratio"] = percent(parameters["ACK en RX2"])
+    if coverage:
+        migrated["input_coverage_enabled"] = True
+    return migrated
 
 
 def calcular_toa(sf: int, payload_bytes: int, bw: int = 125_000) -> float:
@@ -340,6 +447,9 @@ def app_streamlit():
     if "saved_estimations" not in st.session_state:
         st.session_state.saved_estimations = {}
     st.title("Estimador de gateways LoRaWAN — AU915-928")
+    loaded_notice = st.session_state.pop("_loaded_estimation_notice", None)
+    if loaded_notice:
+        st.success(loaded_notice)
     st.caption(
         "ADR ON/OFF · DR fijo sin ADR · perfiles con ADR · ACK downlink 500 kHz · RX2 DR8 SF12"
     )
@@ -350,6 +460,7 @@ def app_streamlit():
             "Preset de entorno",
             options=["Personalizado", "Terminal Contenedores"],
             index=0,
+            key="input_profile",
             help="Terminal Contenedores aplica tanto con ADR OFF como con ADR ON. Ajusta canal/ACK/seguridad para patios con contenedores metálicos, multipath y pérdidas intermitentes. En ADR OFF no cambia el DR/SF fijo seleccionado.",
         )
 
@@ -380,6 +491,7 @@ def app_streamlit():
             min_value=1,
             value=5000,
             step=100,
+            key="input_nodes",
             help="Cantidad total de dispositivos LoRaWAN activos en la red. A mayor cantidad de nodos, mayor carga uplink y mayor cantidad de ACK/downlink.",
         )
         mensajes_hora = st.number_input(
@@ -387,6 +499,7 @@ def app_streamlit():
             min_value=0.01,
             value=1.0,
             step=0.25,
+            key="input_messages_hour",
             help="Frecuencia de transmisión de cada nodo. Subir este valor incrementa linealmente uplinks, ACK y airtime total.",
         )
         payload_ul = st.slider(
@@ -394,6 +507,7 @@ def app_streamlit():
             min_value=1,
             max_value=250,
             value=10,
+            key="input_payload_ul",
             help="Solo FRMPayload. El estimador añade automáticamente los 13 bytes mínimos de LoRaWAN.",
         )
         canales_ul = st.number_input(
@@ -402,6 +516,7 @@ def app_streamlit():
             max_value=64,
             value=8,
             step=1,
+            key="input_uplink_channels",
             help="Cantidad de canales uplink de 125 kHz disponibles por gateway. Más canales aumentan capacidad uplink.",
         )
         eficiencia_aloha = st.slider(
@@ -410,6 +525,7 @@ def app_streamlit():
             max_value=0.30,
             value=preset_eficiencia_aloha,
             step=0.01,
+            key="input_aloha_efficiency",
             help="Representa eficiencia real del acceso uplink tipo ALOHA: colisiones, pérdidas y reutilización imperfecta del canal. Subirlo aumenta capacidad estimada; bajarlo vuelve el modelo más conservador.",
         )
 
@@ -420,6 +536,7 @@ def app_streamlit():
             1.0,
             preset_confirmed_ratio,
             0.05,
+            key="input_confirmed_ratio",
             help="Porcentaje de uplinks que requieren ACK. 1.0 = todos los mensajes requieren ACK. A mayor valor, mayor carga downlink y bloqueo half-duplex.",
         )
         ack_payload = st.slider(
@@ -427,6 +544,7 @@ def app_streamlit():
             min_value=0,
             max_value=20,
             value=0,
+            key="input_ack_payload",
             help="Un ACK vacío usa 0 aquí. El estimador añade automáticamente el paquete LoRaWAN mínimo de 12 bytes.",
         )
         rx2_fallback = st.slider(
@@ -435,6 +553,7 @@ def app_streamlit():
             0.50,
             preset_rx2_fallback,
             0.05,
+            key="input_rx2_ratio",
             help="Porcentaje de ACK que no logran RX1 y terminan transmitiéndose en RX2. Subir este valor aumenta significativamente el airtime downlink.",
         )
         eficiencia_ack = st.slider(
@@ -443,6 +562,7 @@ def app_streamlit():
             0.50,
             preset_eficiencia_ack,
             0.01,
+            key="input_ack_efficiency",
             help="Fracción máxima del tiempo que un gateway puede usar transmitiendo ACK. Valores bajos vuelven el modelo más conservador.",
         )
         max_blocking_rx = st.slider(
@@ -451,6 +571,7 @@ def app_streamlit():
             0.50,
             preset_max_blocking_rx,
             0.01,
+            key="input_max_blocking",
             help="Fracción máxima del tiempo que el gateway puede permanecer transmitiendo ACK y no recibiendo uplinks. Bajarlo exige más gateways.",
         )
         retransmission_factor = st.slider(
@@ -459,21 +580,25 @@ def app_streamlit():
             8.0,
             preset_retransmission_factor,
             0.5,
+            key="input_retransmission_factor",
             help="Representa retransmisiones causadas por pérdida de uplinks o ACK. 1.0 = sin retransmisiones. Valores altos incrementan mucho la carga total.",
         )
 
         with st.expander("Opciones LoRaWAN avanzadas"):
             fopts_uplink = st.slider(
                 "FOpts promedio uplink (bytes)", 0, 15, 0,
+                key="input_fopts_uplink",
                 help="Bytes promedio de comandos MAC transportados en FHDR.",
             )
             fopts_downlink = st.slider(
                 "FOpts promedio downlink (bytes)", 0, 15, 0,
+                key="input_fopts_downlink",
                 help="Bytes promedio de comandos MAC transportados en el ACK/downlink.",
             )
             uplink_dwell_time_enabled = st.toggle(
                 "UplinkDwellTime = 1 (límite 400 ms)",
                 value=True,
+                key="input_uplink_dwell",
                 help="Desactivar solo si la configuración regional/red confirma UplinkDwellTime=0.",
             )
 
@@ -484,6 +609,7 @@ def app_streamlit():
             3.0,
             preset_factor_seguridad,
             0.1,
+            key="input_safety_factor",
             help="Margen ingenieril para crecimiento futuro, variabilidad RF e incertidumbre operacional. No debe duplicar el efecto ACK.",
         )
 
@@ -491,13 +617,19 @@ def app_streamlit():
     adr_enabled = st.toggle(
         "ADR habilitado",
         value=False,
+        key="input_adr_enabled",
         help="ADR OFF: los sensores usan DR/SF fijo. ADR ON: se habilitan perfiles de distribución SF.",
     )
 
     if not adr_enabled:
         st.info("ADR OFF: selecciona el DR/SF fijo configurado en los equipos. El perfil operativo, si está activo, sí ajusta canal/ACK/seguridad, pero no cambia el DR/SF.", icon="ℹ️")
         dr_map = au915_dr_to_sf()
-        dr_fijo = st.selectbox("DR/SF fijo de los equipos", list(dr_map.keys()), index=2)
+        dr_fijo = st.selectbox(
+            "DR/SF fijo de los equipos",
+            list(dr_map.keys()),
+            index=2,
+            key="input_fixed_dr",
+        )
         sf_fijo = dr_map[dr_fijo]
         distribucion = distribucion_por_dr_fijo(sf_fijo)
         st.write(f"Distribución usada: **100% de los nodos en {sf_fijo}**")
@@ -505,14 +637,28 @@ def app_streamlit():
     else:
         st.info("ADR ON: se puede usar un perfil de distribución SF o editarlo manualmente.", icon="ℹ️")
         perfiles = perfiles_adr()
-        perfil_nombre = st.selectbox("Perfil ADR", list(perfiles.keys()))
-        editar = st.checkbox("Editar distribución SF manualmente", value=False)
+        perfil_nombre = st.selectbox(
+            "Perfil ADR", list(perfiles.keys()), key="input_adr_profile"
+        )
+        editar = st.checkbox(
+            "Editar distribución SF manualmente",
+            value=False,
+            key="input_edit_sf",
+        )
         base = perfiles[perfil_nombre]
         cols = st.columns(6)
         valores = {}
         for col, sf in zip(cols, SF_ORDER):
             with col:
-                valores[sf] = st.number_input(sf, 0.0, 1.0, float(base[sf]), 0.01, disabled=not editar)
+                valores[sf] = st.number_input(
+                    sf,
+                    0.0,
+                    1.0,
+                    float(base[sf]),
+                    0.01,
+                    disabled=not editar,
+                    key=f"input_sf_{sf}",
+                )
         suma_sf = sum(valores.values())
         st.write(f"Suma actual distribución SF: **{suma_sf:.3f}**")
         distribucion = normalizar_distribucion(valores) if not math.isclose(suma_sf, 1.0, abs_tol=1e-6) else valores
@@ -524,11 +670,14 @@ def app_streamlit():
     coverage_enabled = st.toggle(
         "Incorporar polígono y cobertura RF",
         value=False,
+        key="input_coverage_enabled",
         help="Combina la cantidad requerida por cobertura con el cuello de botella de capacidad.",
     )
     coverage_plan = None
     coverage_geometry = None
     use_coverage_distribution = False
+    polygon_name = None
+    polygon_bytes = None
 
     if coverage_enabled:
         st.info(
@@ -536,21 +685,53 @@ def app_streamlit():
             "En contenedores debe calibrarse posteriormente con mediciones RSSI/SNR.",
             icon="🗺️",
         )
+        def polygon_upload_changed():
+            st.session_state["_prefer_restored_polygon"] = False
+
         geojson_file = st.file_uploader(
             "Polígono del recinto (KMZ, KML o GeoJSON)",
             type=["kmz", "kml", "geojson", "json"],
+            key="polygon_upload",
+            on_change=polygon_upload_changed,
             help="KMZ/KML de Google Earth o GeoJSON Polygon/MultiPolygon en WGS84.",
         )
+        prefer_restored_polygon = st.session_state.get(
+            "_prefer_restored_polygon", False
+        )
+        active_polygon = st.session_state.get("_active_polygon")
+        if prefer_restored_polygon and active_polygon:
+            polygon_name = active_polygon["name"]
+            polygon_bytes = base64.b64decode(active_polygon["data_base64"])
+            st.info(f"Polígono restaurado: {polygon_name}")
+        elif prefer_restored_polygon:
+            polygon_name = None
+            polygon_bytes = None
+        elif geojson_file is not None:
+            polygon_name = geojson_file.name
+            polygon_bytes = geojson_file.getvalue()
+            st.session_state["_active_polygon"] = {
+                "name": polygon_name,
+                "data_base64": base64.b64encode(polygon_bytes).decode("ascii"),
+            }
+        elif active_polygon:
+            polygon_name = active_polygon["name"]
+            polygon_bytes = base64.b64decode(active_polygon["data_base64"])
+            st.info(f"Polígono restaurado: {polygon_name}")
+        else:
+            polygon_name = None
+            polygon_bytes = None
         environment_name = st.selectbox(
             "Ambiente RF",
             list(ENVIRONMENT_PRESETS.keys()),
             index=list(ENVIRONMENT_PRESETS.keys()).index("Terminal de contenedores"),
+            key="input_environment",
         )
         environment = ENVIRONMENT_PRESETS[environment_name]
         antenna_name = st.selectbox(
             "Tipo de antena por gateway",
             list(ANTENNA_PRESETS.keys()),
             index=list(ANTENNA_PRESETS.keys()).index("Sectorial 60° × 35°"),
+            key="input_antenna",
             help="El modelo considera una antena y un azimut por gateway.",
         )
         antenna_preset = ANTENNA_PRESETS[antenna_name]
@@ -563,24 +744,41 @@ def app_streamlit():
                 max_value=3,
                 value=2,
                 step=1,
+                key="input_redundancy",
                 help="2 exige que cada punto de evaluación sea cubierto por dos gateways distintos.",
             )
             target_sf = st.selectbox(
                 "SF máximo de diseño",
                 SF_ORDER,
                 index=3,
+                key="input_target_sf",
                 help="SF10 es una referencia prudente si el dwell time de 400 ms está activo.",
             )
         with cov2:
-            tx_eirp = st.number_input("EIRP del dispositivo (dBm)", 0.0, 36.0, 20.0, 1.0)
+            tx_eirp = st.number_input(
+                "EIRP del dispositivo (dBm)",
+                0.0,
+                36.0,
+                20.0,
+                1.0,
+                key="input_tx_eirp",
+            )
             gateway_gain = st.number_input(
                 "Ganancia máxima de antena (dBi)",
                 0.0,
                 30.0,
                 float(antenna_preset["gain_dbi"]),
                 0.5,
+                key="input_gateway_gain",
             )
-            cable_loss = st.number_input("Pérdidas cable/conectores (dB)", 0.0, 10.0, 2.0, 0.5)
+            cable_loss = st.number_input(
+                "Pérdidas cable/conectores (dB)",
+                0.0,
+                10.0,
+                2.0,
+                0.5,
+                key="input_cable_loss",
+            )
         with cov3:
             horizontal_beamwidth = st.number_input(
                 "Haz horizontal HPBW (°)",
@@ -588,6 +786,7 @@ def app_streamlit():
                 360.0,
                 float(antenna_preset["horizontal_beamwidth_deg"]),
                 5.0,
+                key="input_horizontal_beamwidth",
             )
             vertical_beamwidth = st.number_input(
                 "Haz vertical HPBW (°)",
@@ -595,6 +794,7 @@ def app_streamlit():
                 180.0,
                 float(antenna_preset["vertical_beamwidth_deg"]),
                 5.0,
+                key="input_vertical_beamwidth",
             )
             max_antenna_attenuation = st.number_input(
                 "Atenuación lateral/trasera máx. (dB)",
@@ -602,22 +802,31 @@ def app_streamlit():
                 50.0,
                 float(antenna_preset["max_attenuation_db"]),
                 1.0,
+                key="input_max_antenna_attenuation",
             )
         with cov4:
-            gateway_height = st.number_input("Altura del gateway (m)", 2.0, 100.0, 20.0, 1.0)
-            device_height = st.number_input("Altura del dispositivo (m)", 0.0, 20.0, 1.5, 0.5)
+            gateway_height = st.number_input(
+                "Altura del gateway (m)", 2.0, 100.0, 20.0, 1.0,
+                key="input_gateway_height",
+            )
+            device_height = st.number_input(
+                "Altura del dispositivo (m)", 0.0, 20.0, 1.5, 0.5,
+                key="input_device_height",
+            )
             downtilt = st.number_input(
                 "Downtilt hacia el suelo (°)",
                 -10.0,
                 45.0,
                 float(antenna_preset["downtilt_deg"]),
                 1.0,
+                key="input_downtilt",
             )
 
         rf1, rf2, rf3, rf4 = st.columns(4)
         with rf1:
             resolution_m = st.number_input(
-                "Resolución de evaluación (m)", 25.0, 1000.0, 100.0, 25.0
+                "Resolución de evaluación (m)", 25.0, 1000.0, 100.0, 25.0,
+                key="input_resolution",
             )
             minimum_site_separation = st.number_input(
                 "Separación mínima entre sitios (m)",
@@ -625,6 +834,7 @@ def app_streamlit():
                 5000.0,
                 100.0,
                 25.0,
+                key="input_minimum_site_separation",
                 help="Impide que distintas orientaciones en una misma coordenada se contabilicen como gateways redundantes. También distribuye los gateways añadidos por capacidad.",
             )
         with rf2:
@@ -634,6 +844,7 @@ def app_streamlit():
                 6.0,
                 float(environment["path_loss_exponent"]),
                 0.1,
+                key="input_path_loss_exponent",
             )
         with rf3:
             additional_loss = st.number_input(
@@ -642,6 +853,7 @@ def app_streamlit():
                 50.0,
                 float(environment["additional_loss_db"]),
                 1.0,
+                key="input_additional_loss",
             )
         with rf4:
             fade_margin = st.number_input(
@@ -650,6 +862,7 @@ def app_streamlit():
                 40.0,
                 float(environment["fade_margin_db"]),
                 1.0,
+                key="input_fade_margin",
             )
 
         strategy_name = st.selectbox(
@@ -659,6 +872,7 @@ def app_streamlit():
                 "Cantidad mínima de sitios",
             ],
             index=0,
+            key="input_strategy",
             help=(
                 "La estrategia balanceada agrega muestras en todos los bordes, prioriza extremos "
                 "y favorece sitios separados. La estrategia mínima concentra gateways cuando eso "
@@ -674,6 +888,7 @@ def app_streamlit():
                     6.0,
                     3.0,
                     0.5,
+                    key="input_edge_priority",
                     help="Valores altos dan mayor importancia a extremos, entrantes y bordes del polígono.",
                 )
             with strategy_col2:
@@ -683,16 +898,17 @@ def app_streamlit():
                     1.0,
                     0.30,
                     0.05,
+                    key="input_dispersion_weight",
                     help="Favorece candidatos alejados de sitios ya seleccionados sin abandonar la cobertura RF.",
                 )
         else:
             edge_priority = 1.0
             dispersion_weight = 0.0
 
-        if geojson_file is not None:
+        if polygon_bytes is not None:
             try:
                 coverage_geometry = parse_polygon_file(
-                    geojson_file.name, geojson_file.getvalue()
+                    polygon_name, polygon_bytes
                 )
                 radio_config = RadioConfig(
                     tx_eirp_dbm=float(tx_eirp),
@@ -808,6 +1024,7 @@ def app_streamlit():
                 use_coverage_distribution = st.checkbox(
                     "Usar la distribución SF derivada de la cobertura en el cálculo de capacidad",
                     value=True,
+                    key="input_use_coverage_distribution",
                 )
                 if use_coverage_distribution:
                     distribucion = coverage_plan.sf_distribution
@@ -1234,8 +1451,18 @@ def app_streamlit():
             }
 
         current_snapshot = {
+            "snapshot_version": 2,
             "name": "Estimación actual",
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "input_state": capture_estimation_input_state(st.session_state),
+            "polygon": (
+                {
+                    "name": polygon_name,
+                    "data_base64": base64.b64encode(polygon_bytes).decode("ascii"),
+                }
+                if polygon_name and polygon_bytes is not None
+                else None
+            ),
             "parameters": scenario_parameters,
             "summary": {
                 "gateways_finales": gateways_finales,
@@ -1256,7 +1483,9 @@ def app_streamlit():
         st.divider()
         st.subheader("Guardar y compartir estimaciones")
         st.caption(
-            "Los escenarios se guardan durante esta sesión. Descarga la cartera JSON para conservarlos y volver a importarlos posteriormente."
+            "Los escenarios se guardan durante esta sesión. Al seleccionar uno se restauran sus "
+            "controles y se recalcula. Descarga la cartera JSON para conservarlos y volver a "
+            "importarlos posteriormente."
         )
         save_col, pdf_col = st.columns([2, 1])
         with save_col:
@@ -1289,7 +1518,37 @@ def app_streamlit():
         saved_names = sorted(st.session_state.saved_estimations)
         if saved_names:
             st.markdown("#### Estimaciones guardadas")
-            selected_name = st.selectbox("Seleccionar estimación", saved_names)
+
+            def load_selected_estimation():
+                name = st.session_state.get("saved_estimation_selector")
+                snapshot = st.session_state.saved_estimations.get(name)
+                if not snapshot:
+                    return
+                restored = restorable_input_state(snapshot)
+                for key, value in restored.items():
+                    st.session_state[key] = value
+                polygon = snapshot.get("polygon")
+                if isinstance(polygon, dict) and polygon.get("data_base64"):
+                    st.session_state["_active_polygon"] = polygon
+                else:
+                    st.session_state.pop("_active_polygon", None)
+                st.session_state["_prefer_restored_polygon"] = True
+                if snapshot.get("input_state"):
+                    st.session_state["_loaded_estimation_notice"] = (
+                        f"Estimación '{name}' cargada y recalculada con sus parámetros guardados."
+                    )
+                else:
+                    st.session_state["_loaded_estimation_notice"] = (
+                        f"Estimación antigua '{name}' cargada parcialmente. Guárdala nuevamente "
+                        "para conservar todos los controles y el polígono."
+                    )
+
+            selected_name = st.selectbox(
+                "Seleccionar estimación",
+                saved_names,
+                key="saved_estimation_selector",
+                on_change=load_selected_estimation,
+            )
             selected_snapshot = st.session_state.saved_estimations[selected_name]
             saved_summary = selected_snapshot.get("summary", {})
             st.dataframe(
@@ -1308,7 +1567,14 @@ def app_streamlit():
                 hide_index=True,
                 use_container_width=True,
             )
-            saved_pdf_col, portfolio_col, delete_col = st.columns(3)
+            load_col, saved_pdf_col, portfolio_col, delete_col = st.columns(4)
+            with load_col:
+                st.button(
+                    "Cargar seleccionada",
+                    on_click=load_selected_estimation,
+                    use_container_width=True,
+                    type="primary",
+                )
             with saved_pdf_col:
                 st.download_button(
                     "Descargar PDF guardado",
@@ -1326,9 +1592,20 @@ def app_streamlit():
                     use_container_width=True,
                 )
             with delete_col:
-                if st.button("Eliminar seleccionada", use_container_width=True):
-                    del st.session_state.saved_estimations[selected_name]
-                    st.rerun()
+                def delete_selected_estimation():
+                    name = st.session_state.get("saved_estimation_selector")
+                    st.session_state.saved_estimations.pop(name, None)
+                    remaining = sorted(st.session_state.saved_estimations)
+                    if remaining:
+                        st.session_state["saved_estimation_selector"] = remaining[0]
+                    else:
+                        st.session_state.pop("saved_estimation_selector", None)
+
+                st.button(
+                    "Eliminar seleccionada",
+                    on_click=delete_selected_estimation,
+                    use_container_width=True,
+                )
 
         with st.expander("Importar estimaciones guardadas"):
             portfolio_file = st.file_uploader(
