@@ -173,6 +173,7 @@ class CoveragePlan:
     candidate_azimuths_deg: list[float]
     candidate_site_ids: list[int]
     candidate_coverage_counts: list[int]
+    candidate_quality_scores: list[float]
     selected_indices: list[int]
     redundancy: int
     coverage_fraction: float
@@ -507,29 +508,42 @@ def _coverage_sets(
     radius_m: float,
     radio: RadioConfig,
     antenna: AntennaConfig,
-) -> list[list[int]]:
+) -> tuple[list[list[int]], list[float]]:
     radius_squared = radius_m * radius_m
-    return [
-        [
-            index
-            for index, point in enumerate(evaluation_points)
-            if (candidate[0] - point[0]) ** 2 + (candidate[1] - point[1]) ** 2
-            <= radius_squared
-            and link_received_power_dbm(
+    threshold_dbm = radio.receiver_sensitivity_dbm + radio.fade_margin_db
+    coverage_sets: list[list[int]] = []
+    quality_scores: list[float] = []
+    for candidate_index, candidate in enumerate(candidates):
+        covered_points: list[int] = []
+        quality = 0.0
+        for point_index, point in enumerate(evaluation_points):
+            if (
+                (candidate[0] - point[0]) ** 2
+                + (candidate[1] - point[1]) ** 2
+                > radius_squared
+            ):
+                continue
+            power_dbm = link_received_power_dbm(
                 candidate,
                 point,
                 candidate_azimuths_deg[candidate_index],
                 radio,
                 antenna,
             )
-            >= radio.receiver_sensitivity_dbm + radio.fade_margin_db
-        ]
-        for candidate_index, candidate in enumerate(candidates)
-    ]
+            margin_db = power_dbm - threshold_dbm
+            if margin_db >= 0:
+                covered_points.append(point_index)
+                # Prefer an orientation whose main lobe provides useful margin
+                # inside the polygon, even if several azimuths cover the same count.
+                quality += 1.0 + min(margin_db, 40.0)
+        coverage_sets.append(covered_points)
+        quality_scores.append(quality)
+    return coverage_sets, quality_scores
 
 
 def _greedy_multicover(
     coverage_sets: list[list[int]],
+    candidate_quality_scores: list[float],
     candidate_points: list[tuple[float, float]],
     candidate_site_ids: list[int],
     point_count: int,
@@ -543,8 +557,13 @@ def _greedy_multicover(
     while available and any(value > 0 for value in remaining):
         best = max(
             available,
-            key=lambda candidate: sum(
-                1 for point_index in coverage_sets[candidate] if remaining[point_index] > 0
+            key=lambda candidate: (
+                sum(
+                    1
+                    for point_index in coverage_sets[candidate]
+                    if remaining[point_index] > 0
+                ),
+                candidate_quality_scores[candidate],
             ),
         )
         score = sum(1 for point_index in coverage_sets[best] if remaining[point_index] > 0)
@@ -638,6 +657,42 @@ def _spread_sample_points(
     return [unique_points[index] for index in selected]
 
 
+def ray_length_within_geometry(
+    geometry: ProjectedGeometry,
+    start: tuple[float, float],
+    azimuth_deg: float,
+    maximum_length_m: float,
+) -> float:
+    """Return the first in-polygon ray length, useful for map arrows."""
+    maximum_length_m = max(float(maximum_length_m), 0.0)
+    if maximum_length_m == 0 or not geometry.contains(start):
+        return 0.0
+    angle = math.radians(azimuth_deg)
+
+    def point_at(distance: float) -> tuple[float, float]:
+        return (
+            start[0] + math.sin(angle) * distance,
+            start[1] + math.cos(angle) * distance,
+        )
+
+    step = max(maximum_length_m / 80.0, 1.0)
+    last_inside = 0.0
+    distance = step
+    while distance <= maximum_length_m:
+        if not geometry.contains(point_at(distance)):
+            low, high = last_inside, distance
+            for _ in range(16):
+                middle = (low + high) / 2
+                if geometry.contains(point_at(middle)):
+                    low = middle
+                else:
+                    high = middle
+            return low
+        last_inside = distance
+        distance += step
+    return maximum_length_m
+
+
 def plan_coverage(
     geometry: ProjectedGeometry,
     config: RadioConfig,
@@ -675,7 +730,7 @@ def plan_coverage(
             candidate_azimuths_deg.append(azimuth)
             candidate_site_ids.append(site_id)
 
-    coverage_sets = _coverage_sets(
+    coverage_sets, candidate_quality_scores = _coverage_sets(
         candidate_points,
         candidate_azimuths_deg,
         evaluation_points,
@@ -685,6 +740,7 @@ def plan_coverage(
     )
     selected_indices, remaining = _greedy_multicover(
         coverage_sets,
+        candidate_quality_scores,
         candidate_points,
         candidate_site_ids,
         len(evaluation_points),
@@ -723,6 +779,7 @@ def plan_coverage(
         candidate_azimuths_deg=candidate_azimuths_deg,
         candidate_site_ids=candidate_site_ids,
         candidate_coverage_counts=[len(items) for items in coverage_sets],
+        candidate_quality_scores=candidate_quality_scores,
         selected_indices=selected_indices,
         redundancy=redundancy,
         coverage_fraction=coverage_fraction,
@@ -782,7 +839,10 @@ def augment_gateway_deployments(
             best_site = next(iter(eligible_sites))
         best = max(
             candidates_by_site[best_site],
-            key=lambda index: plan.candidate_coverage_counts[index],
+            key=lambda index: (
+                plan.candidate_coverage_counts[index],
+                plan.candidate_quality_scores[index],
+            ),
         )
         selected.append(best)
         selected_site_ids.add(best_site)

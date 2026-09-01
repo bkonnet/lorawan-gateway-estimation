@@ -14,6 +14,7 @@ from coverage_model import (
     parse_polygon_file,
     plan_coverage,
     points_to_lon_lat,
+    ray_length_within_geometry,
 )
 from reporting import (
     build_pdf_report,
@@ -879,8 +880,16 @@ def app_streamlit():
                     label="Gateway",
                 )
                 if not coverage_plan.antenna_config.is_omnidirectional:
-                    arrow_length = coverage_plan.radius_m * 0.28
                     for point, azimuth in zip(final_sites, final_azimuths):
+                        desired_arrow_length = coverage_plan.radius_m * 0.28
+                        arrow_length = ray_length_within_geometry(
+                            coverage_geometry,
+                            point,
+                            azimuth,
+                            desired_arrow_length,
+                        ) * 0.92
+                        if arrow_length < max(coverage_plan.radius_m * 0.03, 5):
+                            continue
                         azimuth_rad = math.radians(azimuth)
                         ax_cov.arrow(
                             point[0],

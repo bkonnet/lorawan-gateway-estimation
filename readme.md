@@ -27,6 +27,8 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Separación mínima configurable entre sitios y distribución espacial de gateways añadidos por capacidad.
 - Perfil RF ajustable para terminales de contenedores.
 - Antenas omnidireccionales, sectoriales y direccionales con ganancia, HPBW, azimut y downtilt.
+- Orientación automática de antenas direccionales según cobertura y margen RF útil dentro del polígono.
+- Flechas de orientación recortadas al primer límite del área para evitar representaciones engañosas.
 - Distribución SF derivada del link budget y la geometría.
 - Exportación de ubicaciones preliminares en CSV y GeoJSON.
 - Exportación de resultados a CSV.

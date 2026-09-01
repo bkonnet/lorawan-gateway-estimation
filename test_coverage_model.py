@@ -18,6 +18,7 @@ from coverage_model import (
     parse_kmz,
     parse_polygon_file,
     plan_coverage,
+    ray_length_within_geometry,
 )
 
 
@@ -185,6 +186,39 @@ class CoverageModelTests(unittest.TestCase):
         for index, first in enumerate(points):
             for second in points[index + 1 :]:
                 self.assertGreaterEqual(math.dist(first, second), 125)
+
+    def test_capacity_sector_azimuths_favor_polygon_interior(self):
+        geometry = parse_geojson(SQUARE)
+        preset = ANTENNA_PRESETS["Sectorial 60° × 35°"]
+        antenna = AntennaConfig(
+            antenna_type="Sectorial 60° × 35°",
+            gain_dbi=preset["gain_dbi"],
+            horizontal_beamwidth_deg=preset["horizontal_beamwidth_deg"],
+            vertical_beamwidth_deg=preset["vertical_beamwidth_deg"],
+            max_attenuation_db=preset["max_attenuation_db"],
+        )
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(gateway_gain_dbi=antenna.gain_dbi),
+            antenna=antenna,
+            redundancy=1,
+            resolution_m=100,
+            minimum_site_separation_m=125,
+        )
+        points, azimuths = augment_gateway_deployments(plan, 8)
+        for point, azimuth in zip(points, azimuths):
+            arrow_length = ray_length_within_geometry(
+                geometry, point, azimuth, plan.radius_m * 0.2
+            )
+            self.assertGreater(arrow_length, 25)
+
+    def test_map_arrow_is_clipped_inside_polygon(self):
+        geometry = parse_geojson(SQUARE)
+        plan = plan_coverage(geometry, RadioConfig(), redundancy=1, resolution_m=100)
+        point = plan.evaluation_points[len(plan.evaluation_points) // 2]
+        length = ray_length_within_geometry(geometry, point, 90.0, 10_000)
+        endpoint = (point[0] + length * 0.999, point[1])
+        self.assertTrue(geometry.contains(endpoint))
 
     def test_augment_and_export_sites(self):
         geometry = parse_geojson(SQUARE)
