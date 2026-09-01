@@ -7,7 +7,7 @@ The result is a planning estimate, not a substitute for a calibrated RF survey.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 import json
 import math
@@ -168,6 +168,7 @@ class AntennaConfig:
 class CoveragePlan:
     area_m2: float
     radius_m: float
+    isotropic_radius_m: float
     evaluation_points: list[tuple[float, float]]
     candidate_points: list[tuple[float, float]]
     candidate_azimuths_deg: list[float]
@@ -181,6 +182,7 @@ class CoveragePlan:
     sf_distribution: dict[str, float]
     warnings: list[str]
     antenna_config: AntennaConfig
+    radio_config: RadioConfig
     minimum_site_separation_m: float
 
     @property
@@ -629,6 +631,43 @@ def _derive_sf_distribution(
     return {sf: count / total for sf, count in counts.items()}
 
 
+def deployment_coverage_counts(
+    plan: CoveragePlan,
+    gateway_points: list[tuple[float, float]],
+    gateway_azimuths_deg: list[float],
+) -> list[int]:
+    """Count distinct deployed gateways covering every evaluation point."""
+    if len(gateway_points) != len(gateway_azimuths_deg):
+        raise ValueError("Cada gateway debe tener exactamente un azimut.")
+    threshold_dbm = (
+        plan.radio_config.receiver_sensitivity_dbm
+        + plan.radio_config.fade_margin_db
+    )
+    radius_squared = plan.radius_m * plan.radius_m
+    counts: list[int] = []
+    for point in plan.evaluation_points:
+        count = 0
+        for gateway, azimuth in zip(gateway_points, gateway_azimuths_deg):
+            if (
+                (gateway[0] - point[0]) ** 2 + (gateway[1] - point[1]) ** 2
+                > radius_squared
+            ):
+                continue
+            if (
+                link_received_power_dbm(
+                    gateway,
+                    point,
+                    azimuth,
+                    plan.radio_config,
+                    plan.antenna_config,
+                )
+                >= threshold_dbm
+            ):
+                count += 1
+        counts.append(count)
+    return counts
+
+
 def _spread_sample_points(
     points: list[tuple[float, float]], max_count: int
 ) -> list[tuple[float, float]]:
@@ -774,6 +813,9 @@ def plan_coverage(
     return CoveragePlan(
         area_m2=geometry.area_m2,
         radius_m=radius_m,
+        isotropic_radius_m=coverage_radius_m(
+            replace(config, gateway_gain_dbi=0.0)
+        ),
         evaluation_points=evaluation_points,
         candidate_points=candidate_points,
         candidate_azimuths_deg=candidate_azimuths_deg,
@@ -787,6 +829,7 @@ def plan_coverage(
         sf_distribution=sf_distribution,
         warnings=warnings,
         antenna_config=antenna,
+        radio_config=config,
         minimum_site_separation_m=minimum_site_separation_m,
     )
 

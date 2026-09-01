@@ -10,6 +10,7 @@ from coverage_model import (
     AntennaConfig,
     RadioConfig,
     augment_gateway_deployments,
+    deployment_coverage_counts,
     gateway_sites_geojson,
     parse_polygon_file,
     plan_coverage,
@@ -30,8 +31,14 @@ except ImportError:
 
 try:
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Circle, Patch, Wedge
 except ImportError:
     plt = None
+    Circle = None
+    Line2D = None
+    Patch = None
+    Wedge = None
 
 """
 Estimador interactivo de gateways LoRaWAN para AU915-928
@@ -685,6 +692,7 @@ def app_streamlit():
                 st.caption(
                     f"Modelo: una antena {antenna_name} por gateway, ganancia {gateway_gain:.1f} dBi, "
                     f"HPBW {horizontal_beamwidth:.0f}° × {vertical_beamwidth:.0f}° y downtilt {downtilt:.0f}°."
+                    f" Referencia isotrópica 0 dBi: {coverage_plan.isotropic_radius_m:.0f} m."
                 )
 
                 for warning in coverage_plan.warnings:
@@ -843,6 +851,40 @@ def app_streamlit():
                     "resolución espacial de candidatos o habilite ubicaciones adicionales."
                 )
             lon_lat_sites = points_to_lon_lat(final_sites, coverage_geometry.projection)
+            final_coverage_counts = deployment_coverage_counts(
+                coverage_plan, final_sites, final_azimuths
+            )
+            covered_evaluation_points = sum(
+                count >= coverage_plan.redundancy
+                for count in final_coverage_counts
+            )
+            final_coverage_fraction = (
+                covered_evaluation_points / len(final_coverage_counts)
+                if final_coverage_counts
+                else 0.0
+            )
+            verification_col1, verification_col2, verification_col3 = st.columns(3)
+            verification_col1.metric(
+                "Cobertura final verificada",
+                f"{final_coverage_fraction:.1%}",
+            )
+            verification_col2.metric(
+                "Puntos que cumplen redundancia",
+                f"{covered_evaluation_points}/{len(final_coverage_counts)}",
+            )
+            verification_col3.metric(
+                "Redundancia exigida",
+                f"{coverage_plan.redundancy} gateways",
+            )
+            if final_coverage_fraction >= 0.999:
+                st.success(
+                    "Todos los puntos de evaluación del polígono cumplen la redundancia requerida."
+                )
+            else:
+                st.error(
+                    f"Hay {len(final_coverage_counts) - covered_evaluation_points} puntos de evaluación "
+                    "que todavía no cumplen la redundancia. Las zonas se muestran en rojo en el mapa."
+                )
             sites_df = pd.DataFrame(
                 [
                     {
@@ -860,7 +902,20 @@ def app_streamlit():
             st.map(sites_df, latitude="latitude", longitude="longitude", size=60)
             st.dataframe(sites_df, use_container_width=True, hide_index=True)
             if plt is not None:
+                display_col1, display_col2 = st.columns(2)
+                with display_col1:
+                    show_coverage_points = st.checkbox(
+                        "Mostrar verificación de cobertura por puntos",
+                        value=True,
+                    )
+                with display_col2:
+                    show_isotropic_reference = st.checkbox(
+                        "Mostrar referencia isotrópica 0 dBi",
+                        value=True,
+                        disabled=coverage_plan.antenna_config.is_omnidirectional,
+                    )
                 fig_cov, ax_cov = plt.subplots(figsize=(9, 7))
+                footprint_color = "tab:blue"
                 for polygon in coverage_geometry.polygons:
                     for ring_index, ring in enumerate(polygon):
                         xs = [point[0] for point in ring]
@@ -870,6 +925,87 @@ def app_streamlit():
                             ys,
                             color="black" if ring_index == 0 else "gray",
                             linewidth=1.5,
+                        )
+                for point, azimuth in zip(final_sites, final_azimuths):
+                    if coverage_plan.antenna_config.is_omnidirectional:
+                        footprint = Circle(
+                            point,
+                            coverage_plan.radius_m,
+                            facecolor=footprint_color,
+                            edgecolor=footprint_color,
+                            linewidth=1.0,
+                            alpha=0.10,
+                            zorder=1,
+                        )
+                    else:
+                        matplotlib_angle = 90.0 - azimuth
+                        half_beamwidth = (
+                            coverage_plan.antenna_config.horizontal_beamwidth_deg / 2
+                        )
+                        footprint = Wedge(
+                            point,
+                            coverage_plan.radius_m,
+                            matplotlib_angle - half_beamwidth,
+                            matplotlib_angle + half_beamwidth,
+                            facecolor=footprint_color,
+                            edgecolor=footprint_color,
+                            linewidth=1.0,
+                            alpha=0.12,
+                            zorder=1,
+                        )
+                    ax_cov.add_patch(footprint)
+                    if (
+                        show_isotropic_reference
+                        and not coverage_plan.antenna_config.is_omnidirectional
+                    ):
+                        ax_cov.add_patch(
+                            Circle(
+                                point,
+                                coverage_plan.isotropic_radius_m,
+                                fill=False,
+                                edgecolor="tab:purple",
+                                linestyle="--",
+                                linewidth=0.8,
+                                alpha=0.45,
+                                zorder=1,
+                            )
+                        )
+                if show_coverage_points:
+                    compliant_points = [
+                        point
+                        for point, count in zip(
+                            coverage_plan.evaluation_points,
+                            final_coverage_counts,
+                        )
+                        if count >= coverage_plan.redundancy
+                    ]
+                    deficient_points = [
+                        point
+                        for point, count in zip(
+                            coverage_plan.evaluation_points,
+                            final_coverage_counts,
+                        )
+                        if count < coverage_plan.redundancy
+                    ]
+                    if compliant_points:
+                        ax_cov.scatter(
+                            [point[0] for point in compliant_points],
+                            [point[1] for point in compliant_points],
+                            color="tab:green",
+                            marker=".",
+                            s=12,
+                            alpha=0.45,
+                            zorder=2,
+                        )
+                    if deficient_points:
+                        ax_cov.scatter(
+                            [point[0] for point in deficient_points],
+                            [point[1] for point in deficient_points],
+                            color="tab:red",
+                            marker="x",
+                            s=24,
+                            linewidth=0.8,
+                            zorder=4,
                         )
                 ax_cov.scatter(
                     [point[0] for point in final_sites],
@@ -903,13 +1039,65 @@ def app_streamlit():
                             length_includes_head=True,
                         )
                 ax_cov.set_aspect("equal", adjustable="box")
-                ax_cov.set_title("Polígono y orientación preliminar de antenas")
+                min_x, min_y, max_x, max_y = coverage_geometry.bounds
+                map_span = max(max_x - min_x, max_y - min_y, 1.0)
+                map_padding = map_span * 0.06
+                ax_cov.set_xlim(min_x - map_padding, max_x + map_padding)
+                ax_cov.set_ylim(min_y - map_padding, max_y + map_padding)
+                ax_cov.set_title(
+                    "Huellas nominales y verificación de cobertura "
+                    f"({final_coverage_fraction:.1%} con redundancia {coverage_plan.redundancy})"
+                )
                 ax_cov.set_xlabel("Este local (m)")
                 ax_cov.set_ylabel("Norte local (m)")
                 ax_cov.grid(True, alpha=0.25)
-                ax_cov.legend()
+                legend_handles = [
+                    Line2D(
+                        [0], [0], marker="^", color="none", markerfacecolor="tab:red",
+                        markeredgecolor="tab:red", markersize=8, label="Gateway",
+                    ),
+                    Patch(
+                        facecolor=footprint_color,
+                        edgecolor=footprint_color,
+                        alpha=0.15,
+                        label=(
+                            "Cobertura circular nominal"
+                            if coverage_plan.antenna_config.is_omnidirectional
+                            else "Cono HPBW nominal"
+                        ),
+                    ),
+                ]
+                if show_coverage_points:
+                    legend_handles.extend(
+                        [
+                            Line2D(
+                                [0], [0], marker=".", color="tab:green", linestyle="none",
+                                markersize=8, label="Cumple redundancia",
+                            ),
+                            Line2D(
+                                [0], [0], marker="x", color="tab:red", linestyle="none",
+                                markersize=6, label="Cobertura insuficiente",
+                            ),
+                        ]
+                    )
+                if (
+                    show_isotropic_reference
+                    and not coverage_plan.antenna_config.is_omnidirectional
+                ):
+                    legend_handles.append(
+                        Line2D(
+                            [0], [0], color="tab:purple", linestyle="--",
+                            linewidth=1, label="Referencia isotrópica 0 dBi",
+                        )
+                    )
+                ax_cov.legend(handles=legend_handles, fontsize=8, loc="best")
                 st.pyplot(fig_cov)
                 plt.close(fig_cov)
+                st.caption(
+                    "La figura azul representa la huella nominal al HPBW y alcance máximo en boresight. "
+                    "Los puntos verdes/rojos son la validación efectiva del link budget, incluyendo patrón "
+                    "horizontal/vertical, pérdidas, margen y redundancia."
+                )
 
             sites_geojson = gateway_sites_geojson(
                 final_sites,
@@ -987,6 +1175,8 @@ def app_streamlit():
                 "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
                 "SF máximo de diseño": target_sf,
                 "Radio máximo en boresight": f"{coverage_plan.radius_m:.0f} m",
+                "Radio isotrópico de referencia (0 dBi)": f"{coverage_plan.isotropic_radius_m:.0f} m",
+                "Cobertura final verificada": f"{final_coverage_fraction:.1%}",
                 "Tipo de antena": antenna_name,
                 "Ganancia": f"{gateway_gain:.1f} dBi",
                 "HPBW horizontal / vertical": f"{horizontal_beamwidth:.0f}° / {vertical_beamwidth:.0f}°",

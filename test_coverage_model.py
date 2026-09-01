@@ -12,6 +12,7 @@ from coverage_model import (
     augment_gateway_deployments,
     augment_gateway_sites,
     coverage_radius_m,
+    deployment_coverage_counts,
     gateway_sites_geojson,
     parse_geojson,
     parse_kml,
@@ -219,6 +220,43 @@ class CoverageModelTests(unittest.TestCase):
         length = ray_length_within_geometry(geometry, point, 90.0, 10_000)
         endpoint = (point[0] + length * 0.999, point[1])
         self.assertTrue(geometry.contains(endpoint))
+
+    def test_final_deployment_coverage_is_verified_point_by_point(self):
+        geometry = parse_geojson(SQUARE)
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(),
+            redundancy=2,
+            resolution_m=100,
+            minimum_site_separation_m=100,
+        )
+        points, azimuths = augment_gateway_deployments(
+            plan, len(plan.selected_points) + 2
+        )
+        counts = deployment_coverage_counts(plan, points, azimuths)
+        self.assertEqual(len(counts), len(plan.evaluation_points))
+        self.assertTrue(all(count >= 0 for count in counts))
+        verified_fraction = sum(count >= 2 for count in counts) / len(counts)
+        self.assertGreaterEqual(verified_fraction, plan.coverage_fraction)
+
+    def test_isotropic_reference_radius_is_below_directional_boresight(self):
+        geometry = parse_geojson(SQUARE)
+        preset = ANTENNA_PRESETS["Direccional 30° × 30°"]
+        antenna = AntennaConfig(
+            antenna_type="Direccional 30° × 30°",
+            gain_dbi=preset["gain_dbi"],
+            horizontal_beamwidth_deg=preset["horizontal_beamwidth_deg"],
+            vertical_beamwidth_deg=preset["vertical_beamwidth_deg"],
+            max_attenuation_db=preset["max_attenuation_db"],
+        )
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(gateway_gain_dbi=antenna.gain_dbi),
+            antenna=antenna,
+            redundancy=1,
+            resolution_m=150,
+        )
+        self.assertLess(plan.isotropic_radius_m, plan.radius_m)
 
     def test_augment_and_export_sites(self):
         geometry = parse_geojson(SQUARE)
