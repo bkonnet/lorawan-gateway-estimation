@@ -28,6 +28,9 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Distribución SF derivada del link budget y la geometría.
 - Exportación de ubicaciones preliminares en CSV y GeoJSON.
 - Exportación de resultados a CSV.
+- Guardado de múltiples estimaciones con nombre durante la sesión.
+- Exportación/importación de la cartera de escenarios en JSON.
+- Informe PDF descargable para la estimación actual o cualquier escenario guardado.
 - Gráficos de carga uplink, airtime ACK y comparación RX1/RX2.
 
 ---
@@ -51,7 +54,7 @@ pip install -r requirements.txt
 En Windows, si usas el lanzador `py`:
 
 ```powershell
-py -m pip install streamlit pandas matplotlib openpyxl
+py -m pip install streamlit pandas matplotlib openpyxl reportlab
 ```
 
 Dependencias utilizadas:
@@ -62,6 +65,7 @@ Dependencias utilizadas:
 | `pandas` | Tablas y procesamiento de resultados |
 | `matplotlib` | Gráficos |
 | `openpyxl` | Soporte Excel si se desea extender exportación |
+| `reportlab` | Generación del informe PDF compartible |
 
 ---
 

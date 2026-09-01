@@ -1,5 +1,6 @@
 import json
 import math
+from datetime import datetime
 
 import pandas as pd
 
@@ -13,6 +14,12 @@ from coverage_model import (
     parse_polygon_file,
     plan_coverage,
     points_to_lon_lat,
+)
+from reporting import (
+    build_pdf_report,
+    load_scenarios_json,
+    safe_filename,
+    scenarios_json,
 )
 
 try:
@@ -322,6 +329,8 @@ def estimar_gateways(
 
 def app_streamlit():
     st.set_page_config(page_title="Estimador LoRaWAN AU915", layout="wide")
+    if "saved_estimations" not in st.session_state:
+        st.session_state.saved_estimations = {}
     st.title("Estimador de gateways LoRaWAN — AU915-928")
     st.caption(
         "ADR ON/OFF · DR fijo sin ADR · perfiles con ADR · ACK downlink 500 kHz · RX2 DR8 SF12"
@@ -809,6 +818,7 @@ def app_streamlit():
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Descargar CSV", csv, "estimacion_gateways_au915.csv", "text/csv")
 
+        sites_df = None
         if coverage_plan is not None and coverage_geometry is not None:
             st.subheader("Ubicaciones preliminares de gateways")
             final_sites, final_azimuths = augment_gateway_deployments(
@@ -923,6 +933,153 @@ def app_streamlit():
 
             plt.tight_layout()
             st.pyplot(fig)
+            plt.close(fig)
+
+        scenario_parameters = {
+            "Perfil operativo": perfil_operativo,
+            "Nodos totales": int(nodos),
+            "Mensajes por nodo por hora": float(mensajes_hora),
+            "Payload aplicación uplink (bytes)": int(payload_ul),
+            "Payload físico uplink (bytes)": resumen["payload_fisico_uplink_bytes"],
+            "Canales uplink por gateway": int(canales_ul),
+            "Eficiencia ALOHA uplink": float(eficiencia_aloha),
+            "ADR": "Habilitado" if adr_enabled else "Deshabilitado",
+            "Distribución SF": ", ".join(f"{sf}: {value:.1%}" for sf, value in distribucion.items()),
+            "Uplinks confirmados": f"{confirmed_ratio:.1%}",
+            "Payload aplicación ACK (bytes)": int(ack_payload),
+            "ACK en RX2": f"{rx2_fallback:.1%}",
+            "Factor retransmisiones": float(retransmission_factor),
+            "Factor de seguridad": float(factor_seguridad),
+        }
+        scenario_coverage = None
+        if coverage_plan is not None:
+            scenario_coverage = {
+                "Superficie": f"{coverage_plan.area_m2 / 1_000_000:.3f} km2",
+                "Ambiente RF": environment_name,
+                "Redundancia requerida": int(redundancy),
+                "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
+                "SF máximo de diseño": target_sf,
+                "Radio máximo en boresight": f"{coverage_plan.radius_m:.0f} m",
+                "Tipo de antena": antenna_name,
+                "Ganancia": f"{gateway_gain:.1f} dBi",
+                "HPBW horizontal / vertical": f"{horizontal_beamwidth:.0f}° / {vertical_beamwidth:.0f}°",
+                "Downtilt": f"{downtilt:.1f}°",
+                "Altura gateway / dispositivo": f"{gateway_height:.1f} m / {device_height:.1f} m",
+                "Pérdida adicional ambiente": f"{additional_loss:.1f} dB",
+                "Margen de desvanecimiento": f"{fade_margin:.1f} dB",
+            }
+
+        current_snapshot = {
+            "name": "Estimación actual",
+            "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "parameters": scenario_parameters,
+            "summary": {
+                "gateways_finales": gateways_finales,
+                "gateways_por_capacidad": gateways_capacidad,
+                "gateways_por_cobertura": gateways_cobertura if coverage_plan else "Sin polígono",
+                "condicion_dominante": "cobertura" if gateways_cobertura > gateways_capacidad else resumen["cuello_botella"],
+                "gateways_por_uplink": resumen["gateways_por_uplink"],
+                "gateways_por_airtime_ack": resumen["gateways_por_airtime_ack"],
+                "gateways_por_blocking": resumen["gateways_por_blocking"],
+                "airtime_dl_disponible_s_hora": resumen["airtime_dl_disponible_s_hora"],
+            },
+            "coverage": scenario_coverage,
+            "warnings": list(advertencias) + (list(coverage_plan.warnings) if coverage_plan else []),
+            "details": json.loads(df.to_json(orient="records")),
+            "sites": json.loads(sites_df.to_json(orient="records")) if sites_df is not None else [],
+        }
+
+        st.divider()
+        st.subheader("Guardar y compartir estimaciones")
+        st.caption(
+            "Los escenarios se guardan durante esta sesión. Descarga la cartera JSON para conservarlos y volver a importarlos posteriormente."
+        )
+        save_col, pdf_col = st.columns([2, 1])
+        with save_col:
+            scenario_name = st.text_input(
+                "Nombre de esta estimación",
+                placeholder="Ej.: Terminal norte - sectoriales 60° - alternativa A",
+            )
+            if st.button("Guardar estimación", type="primary", use_container_width=True):
+                clean_name = scenario_name.strip()
+                if not clean_name:
+                    st.warning("Ingresa un nombre antes de guardar.")
+                else:
+                    saved_snapshot = dict(current_snapshot)
+                    saved_snapshot["name"] = clean_name
+                    saved_snapshot["saved_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+                    st.session_state.saved_estimations[clean_name] = saved_snapshot
+                    st.success(f"Estimación '{clean_name}' guardada.")
+        with pdf_col:
+            current_report_name = scenario_name.strip() or "Estimación actual"
+            report_snapshot = dict(current_snapshot)
+            report_snapshot["name"] = current_report_name
+            st.download_button(
+                "Descargar PDF actual",
+                build_pdf_report(report_snapshot),
+                f"{safe_filename(current_report_name)}.pdf",
+                "application/pdf",
+                use_container_width=True,
+            )
+
+        saved_names = sorted(st.session_state.saved_estimations)
+        if saved_names:
+            st.markdown("#### Estimaciones guardadas")
+            selected_name = st.selectbox("Seleccionar estimación", saved_names)
+            selected_snapshot = st.session_state.saved_estimations[selected_name]
+            saved_summary = selected_snapshot.get("summary", {})
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Nombre": selected_name,
+                            "Guardada": selected_snapshot.get("saved_at", ""),
+                            "Gateways finales": saved_summary.get("gateways_finales", ""),
+                            "Capacidad": saved_summary.get("gateways_por_capacidad", ""),
+                            "Cobertura": saved_summary.get("gateways_por_cobertura", ""),
+                            "Dominante": saved_summary.get("condicion_dominante", ""),
+                        }
+                    ]
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+            saved_pdf_col, portfolio_col, delete_col = st.columns(3)
+            with saved_pdf_col:
+                st.download_button(
+                    "Descargar PDF guardado",
+                    build_pdf_report(selected_snapshot),
+                    f"{safe_filename(selected_name)}.pdf",
+                    "application/pdf",
+                    use_container_width=True,
+                )
+            with portfolio_col:
+                st.download_button(
+                    "Descargar cartera JSON",
+                    scenarios_json(st.session_state.saved_estimations),
+                    "estimaciones_gateways.json",
+                    "application/json",
+                    use_container_width=True,
+                )
+            with delete_col:
+                if st.button("Eliminar seleccionada", use_container_width=True):
+                    del st.session_state.saved_estimations[selected_name]
+                    st.rerun()
+
+        with st.expander("Importar estimaciones guardadas"):
+            portfolio_file = st.file_uploader(
+                "Archivo de cartera JSON",
+                type=["json"],
+                key="scenario_portfolio_upload",
+            )
+            if st.button("Importar cartera", disabled=portfolio_file is None):
+                try:
+                    imported = load_scenarios_json(portfolio_file.getvalue())
+                    st.session_state.saved_estimations.update(imported)
+                    st.success(f"Se importaron {len(imported)} estimaciones.")
+                    st.rerun()
+                except Exception as import_exc:
+                    st.error(f"No fue posible importar la cartera: {import_exc}")
 
         with st.expander("📖 Interpretación"):
             st.markdown(
