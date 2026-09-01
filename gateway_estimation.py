@@ -652,6 +652,43 @@ def app_streamlit():
                 1.0,
             )
 
+        strategy_name = st.selectbox(
+            "Estrategia de distribución espacial",
+            [
+                "Cobertura balanceada de perímetro y área",
+                "Cantidad mínima de sitios",
+            ],
+            index=0,
+            help=(
+                "La estrategia balanceada agrega muestras en todos los bordes, prioriza extremos "
+                "y favorece sitios separados. La estrategia mínima concentra gateways cuando eso "
+                "reduce la cantidad total."
+            ),
+        )
+        if strategy_name == "Cobertura balanceada de perímetro y área":
+            strategy_col1, strategy_col2 = st.columns(2)
+            with strategy_col1:
+                edge_priority = st.slider(
+                    "Prioridad del perímetro",
+                    1.0,
+                    6.0,
+                    3.0,
+                    0.5,
+                    help="Valores altos dan mayor importancia a extremos, entrantes y bordes del polígono.",
+                )
+            with strategy_col2:
+                dispersion_weight = st.slider(
+                    "Preferencia por distribución espacial",
+                    0.0,
+                    1.0,
+                    0.30,
+                    0.05,
+                    help="Favorece candidatos alejados de sitios ya seleccionados sin abandonar la cobertura RF.",
+                )
+        else:
+            edge_priority = 1.0
+            dispersion_weight = 0.0
+
         if geojson_file is not None:
             try:
                 coverage_geometry = parse_polygon_file(
@@ -683,6 +720,8 @@ def app_streamlit():
                     redundancy=int(redundancy),
                     resolution_m=float(resolution_m),
                     minimum_site_separation_m=float(minimum_site_separation),
+                    edge_priority=float(edge_priority),
+                    dispersion_weight=float(dispersion_weight),
                 )
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Superficie", f"{coverage_plan.area_m2 / 1_000_000:.2f} km²")
@@ -693,6 +732,8 @@ def app_streamlit():
                     f"Modelo: una antena {antenna_name} por gateway, ganancia {gateway_gain:.1f} dBi, "
                     f"HPBW {horizontal_beamwidth:.0f}° × {vertical_beamwidth:.0f}° y downtilt {downtilt:.0f}°."
                     f" Referencia isotrópica 0 dBi: {coverage_plan.isotropic_radius_m:.0f} m."
+                    f" Verificación: {len(coverage_plan.evaluation_points)} puntos, incluyendo "
+                    f"{coverage_plan.boundary_point_count} puntos específicos de perímetro."
                 )
 
                 for warning in coverage_plan.warnings:
@@ -742,6 +783,8 @@ def app_streamlit():
                             redundancy=int(redundancy),
                             resolution_m=float(resolution_m),
                             minimum_site_separation_m=float(minimum_site_separation),
+                            edge_priority=float(edge_priority),
+                            dispersion_weight=float(dispersion_weight),
                         )
                         comparison_rows.append(
                             {
@@ -1172,6 +1215,10 @@ def app_streamlit():
                 "Ambiente RF": environment_name,
                 "Redundancia requerida": int(redundancy),
                 "Separación mínima entre sitios": f"{minimum_site_separation:.0f} m",
+                "Estrategia espacial": strategy_name,
+                "Prioridad del perímetro": float(edge_priority),
+                "Preferencia de dispersión": float(dispersion_weight),
+                "Puntos de evaluación del perímetro": coverage_plan.boundary_point_count,
                 "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
                 "SF máximo de diseño": target_sf,
                 "Radio máximo en boresight": f"{coverage_plan.radius_m:.0f} m",

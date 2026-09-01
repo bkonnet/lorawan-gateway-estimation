@@ -258,6 +258,45 @@ class CoverageModelTests(unittest.TestCase):
         )
         self.assertLess(plan.isotropic_radius_m, plan.radius_m)
 
+    def test_boundary_is_sampled_more_finely_than_interior_grid(self):
+        geometry = parse_geojson(SQUARE)
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(),
+            redundancy=1,
+            resolution_m=200,
+        )
+        self.assertGreater(plan.boundary_point_count, 0)
+        self.assertEqual(len(plan.evaluation_points), len(plan.evaluation_weights))
+        boundary_weights = plan.evaluation_weights[-plan.boundary_point_count :]
+        self.assertTrue(all(weight == 3.0 for weight in boundary_weights))
+
+    def test_balanced_strategy_covers_heterogeneous_multipolygon_edges(self):
+        heterogeneous = {
+            "type": "MultiPolygon",
+            "coordinates": [
+                [[[0.000, 0.000], [0.006, 0.000], [0.006, 0.002], [0.000, 0.002], [0.000, 0.000]]],
+                [[[0.012, 0.000], [0.014, 0.000], [0.014, 0.008], [0.012, 0.008], [0.012, 0.000]]],
+            ],
+        }
+        geometry = parse_geojson(heterogeneous)
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(target_sf="SF10"),
+            redundancy=1,
+            resolution_m=100,
+            minimum_site_separation_m=75,
+            edge_priority=4.0,
+            dispersion_weight=0.4,
+        )
+        points, azimuths = augment_gateway_deployments(
+            plan, len(plan.selected_points)
+        )
+        counts = deployment_coverage_counts(plan, points, azimuths)
+        boundary_counts = counts[-plan.boundary_point_count :]
+        self.assertGreater(plan.boundary_point_count, 10)
+        self.assertGreater(sum(count >= 1 for count in boundary_counts) / len(boundary_counts), 0.95)
+
     def test_augment_and_export_sites(self):
         geometry = parse_geojson(SQUARE)
         plan = plan_coverage(geometry, RadioConfig(), redundancy=1, resolution_m=200)

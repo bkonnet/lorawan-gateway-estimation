@@ -170,6 +170,8 @@ class CoveragePlan:
     radius_m: float
     isotropic_radius_m: float
     evaluation_points: list[tuple[float, float]]
+    evaluation_weights: list[float]
+    boundary_point_count: int
     candidate_points: list[tuple[float, float]]
     candidate_azimuths_deg: list[float]
     candidate_site_ids: list[int]
@@ -184,6 +186,8 @@ class CoveragePlan:
     antenna_config: AntennaConfig
     radio_config: RadioConfig
     minimum_site_separation_m: float
+    edge_priority: float
+    dispersion_weight: float
 
     @property
     def selected_points(self) -> list[tuple[float, float]]:
@@ -507,6 +511,7 @@ def _coverage_sets(
     candidates: list[tuple[float, float]],
     candidate_azimuths_deg: list[float],
     evaluation_points: list[tuple[float, float]],
+    evaluation_weights: list[float],
     radius_m: float,
     radio: RadioConfig,
     antenna: AntennaConfig,
@@ -537,7 +542,9 @@ def _coverage_sets(
                 covered_points.append(point_index)
                 # Prefer an orientation whose main lobe provides useful margin
                 # inside the polygon, even if several azimuths cover the same count.
-                quality += 1.0 + min(margin_db, 40.0)
+                quality += evaluation_weights[point_index] * (
+                    1.0 + min(margin_db, 40.0)
+                )
         coverage_sets.append(covered_points)
         quality_scores.append(quality)
     return coverage_sets, quality_scores
@@ -548,26 +555,43 @@ def _greedy_multicover(
     candidate_quality_scores: list[float],
     candidate_points: list[tuple[float, float]],
     candidate_site_ids: list[int],
+    evaluation_weights: list[float],
     point_count: int,
     redundancy: int,
     minimum_site_separation_m: float,
+    dispersion_weight: float,
+    dispersion_scale_m: float,
 ) -> tuple[list[int], list[int]]:
     remaining = [redundancy] * point_count
     selected: list[int] = []
     available = set(range(len(coverage_sets)))
 
     while available and any(value > 0 for value in remaining):
-        best = max(
-            available,
-            key=lambda candidate: (
-                sum(
-                    1
-                    for point_index in coverage_sets[candidate]
-                    if remaining[point_index] > 0
-                ),
+        def selection_score(candidate: int) -> tuple[float, float, int]:
+            useful_points = [
+                point_index
+                for point_index in coverage_sets[candidate]
+                if remaining[point_index] > 0
+            ]
+            weighted_coverage = sum(
+                evaluation_weights[point_index] for point_index in useful_points
+            )
+            if selected and dispersion_weight > 0:
+                minimum_distance = min(
+                    math.dist(candidate_points[candidate], candidate_points[chosen])
+                    for chosen in selected
+                )
+                dispersion_ratio = min(
+                    minimum_distance / max(dispersion_scale_m, 1.0), 1.0
+                )
+                weighted_coverage *= 1.0 + dispersion_weight * dispersion_ratio
+            return (
+                weighted_coverage,
                 candidate_quality_scores[candidate],
-            ),
-        )
+                len(useful_points),
+            )
+
+        best = max(available, key=selection_score)
         score = sum(1 for point_index in coverage_sets[best] if remaining[point_index] > 0)
         if score == 0:
             break
@@ -696,6 +720,33 @@ def _spread_sample_points(
     return [unique_points[index] for index in selected]
 
 
+def _sample_boundary_points(
+    geometry: ProjectedGeometry,
+    requested_spacing_m: float,
+    max_points: int,
+) -> list[tuple[float, float]]:
+    """Sample every outer edge and hole boundary so narrow/extreme areas count."""
+    spacing = max(float(requested_spacing_m), 5.0)
+    points: list[tuple[float, float]] = []
+    seen: set[tuple[float, float]] = set()
+    for polygon in geometry.polygons:
+        for ring in polygon:
+            for start, end in zip(ring, ring[1:]):
+                segment_length = math.dist(start, end)
+                segments = max(1, math.ceil(segment_length / spacing))
+                for offset in range(segments):
+                    ratio = offset / segments
+                    point = (
+                        start[0] + (end[0] - start[0]) * ratio,
+                        start[1] + (end[1] - start[1]) * ratio,
+                    )
+                    key = (round(point[0], 5), round(point[1], 5))
+                    if key not in seen:
+                        seen.add(key)
+                        points.append(point)
+    return _spread_sample_points(points, max_points)
+
+
 def ray_length_within_geometry(
     geometry: ProjectedGeometry,
     start: tuple[float, float],
@@ -739,16 +790,31 @@ def plan_coverage(
     redundancy: int = 2,
     resolution_m: float = 100.0,
     minimum_site_separation_m: float = 100.0,
+    edge_priority: float = 3.0,
+    dispersion_weight: float = 0.30,
     max_evaluation_points: int = 3_000,
     max_candidate_points: int = 1_500,
 ) -> CoveragePlan:
     antenna = antenna or AntennaConfig(gain_dbi=config.gateway_gain_dbi)
     redundancy = min(max(int(redundancy), 1), 3)
     minimum_site_separation_m = max(float(minimum_site_separation_m), 0.0)
+    edge_priority = max(float(edge_priority), 1.0)
+    dispersion_weight = min(max(float(dispersion_weight), 0.0), 1.0)
     radius_m = coverage_radius_m(config)
-    evaluation_points, effective_resolution = _grid_points(
-        geometry, resolution_m, max_evaluation_points
+    boundary_budget = max(min(max_evaluation_points // 3, 1_000), 100)
+    interior_budget = max(max_evaluation_points - boundary_budget, 100)
+    interior_evaluation_points, effective_resolution = _grid_points(
+        geometry, resolution_m, interior_budget
     )
+    boundary_points = _sample_boundary_points(
+        geometry,
+        max(effective_resolution / 2.0, 10.0),
+        boundary_budget,
+    )
+    evaluation_points = interior_evaluation_points + boundary_points
+    evaluation_weights = [1.0] * len(interior_evaluation_points) + [
+        edge_priority
+    ] * len(boundary_points)
     candidate_spacing = max(effective_resolution, min(radius_m / 2, radius_m * 0.75))
     azimuth_options = _candidate_azimuths(antenna)
     max_base_candidates = max(max_candidate_points // len(azimuth_options), 10)
@@ -756,7 +822,7 @@ def plan_coverage(
         geometry, candidate_spacing, max_base_candidates
     )
     physical_candidate_points = _spread_sample_points(
-        base_candidate_points + evaluation_points,
+        base_candidate_points + interior_evaluation_points,
         max_base_candidates,
     )
 
@@ -773,6 +839,7 @@ def plan_coverage(
         candidate_points,
         candidate_azimuths_deg,
         evaluation_points,
+        evaluation_weights,
         radius_m,
         config,
         antenna,
@@ -782,9 +849,12 @@ def plan_coverage(
         candidate_quality_scores,
         candidate_points,
         candidate_site_ids,
+        evaluation_weights,
         len(evaluation_points),
         redundancy,
         minimum_site_separation_m,
+        dispersion_weight,
+        radius_m,
     )
     covered = sum(1 for value in remaining if value == 0)
     coverage_fraction = covered / len(evaluation_points)
@@ -817,6 +887,8 @@ def plan_coverage(
             replace(config, gateway_gain_dbi=0.0)
         ),
         evaluation_points=evaluation_points,
+        evaluation_weights=evaluation_weights,
+        boundary_point_count=len(boundary_points),
         candidate_points=candidate_points,
         candidate_azimuths_deg=candidate_azimuths_deg,
         candidate_site_ids=candidate_site_ids,
@@ -831,6 +903,8 @@ def plan_coverage(
         antenna_config=antenna,
         radio_config=config,
         minimum_site_separation_m=minimum_site_separation_m,
+        edge_priority=edge_priority,
+        dispersion_weight=dispersion_weight,
     )
 
 
