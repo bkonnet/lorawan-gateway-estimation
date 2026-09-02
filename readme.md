@@ -334,9 +334,10 @@ Los valores deben reemplazarse por la ficha técnica o, idealmente, por los patr
 5. Aplica el patrón horizontal/vertical, altura, downtilt y obstáculos atravesados.
 6. Si está habilitado el criterio HPBW, descarta como redundancia robusta los enlaces fuera del haz principal horizontal.
 7. Selecciona ubicaciones y azimuts preliminares mediante un algoritmo greedy multi-cover.
-8. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
-9. Reporta cobertura robusta, cobertura RF incluyendo lóbulos laterales, margen mínimo y percentil 10 del margen.
-10. Calcula el resultado final como el máximo entre capacidad y cobertura.
+8. Si quedan puntos sin redundancia, agrega candidatos dirigidos alrededor de esos puntos y del perímetro y repite la optimización con una malla ampliada.
+9. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
+10. Reporta cobertura robusta, cobertura RF incluyendo lóbulos laterales, margen mínimo y percentil 10 del margen.
+11. Calcula el resultado final como el máximo entre capacidad y cobertura.
 
 ```text
 Gateways finales = MAX(gateways por capacidad, gateways por cobertura)

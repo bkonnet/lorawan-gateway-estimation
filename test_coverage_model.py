@@ -356,6 +356,33 @@ class CoverageModelTests(unittest.TestCase):
         boundary_weights = plan.evaluation_weights[-plan.boundary_point_count :]
         self.assertTrue(all(weight == 3.0 for weight in boundary_weights))
 
+    def test_boundary_points_are_available_as_gateway_candidates(self):
+        geometry = parse_geojson(SQUARE)
+        preset = ANTENNA_PRESETS["Sectorial 60° × 35°"]
+        antenna = AntennaConfig(
+            antenna_type="Sectorial 60° × 35°",
+            gain_dbi=preset["gain_dbi"],
+            horizontal_beamwidth_deg=preset["horizontal_beamwidth_deg"],
+            vertical_beamwidth_deg=preset["vertical_beamwidth_deg"],
+            max_attenuation_db=preset["max_attenuation_db"],
+        )
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(gateway_gain_dbi=antenna.gain_dbi),
+            antenna=antenna,
+            redundancy=2,
+            resolution_m=150,
+        )
+        boundary_points = {
+            (round(point[0], 5), round(point[1], 5))
+            for point in plan.evaluation_points[-plan.boundary_point_count :]
+        }
+        candidate_points = {
+            (round(point[0], 5), round(point[1], 5))
+            for point in plan.candidate_points
+        }
+        self.assertTrue(boundary_points & candidate_points)
+
     def test_balanced_strategy_covers_heterogeneous_multipolygon_edges(self):
         heterogeneous = {
             "type": "MultiPolygon",

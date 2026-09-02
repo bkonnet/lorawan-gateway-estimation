@@ -1050,6 +1050,35 @@ def _sample_boundary_points(
     return _spread_sample_points(points, max_points)
 
 
+def _targeted_candidate_points(
+    geometry: ProjectedGeometry,
+    targets: list[tuple[float, float]],
+    radius_m: float,
+    minimum_site_separation_m: float,
+    max_points: int,
+) -> list[tuple[float, float]]:
+    """Create extra in-polygon sites around points left deficient by the first pass."""
+    if not targets or max_points <= 0:
+        return []
+    ring_distance = min(
+        max(radius_m * 0.35, minimum_site_separation_m * 0.75, 10.0),
+        radius_m * 0.85,
+    )
+    points: list[tuple[float, float]] = []
+    for target in targets:
+        if geometry.contains(target):
+            points.append(target)
+        for angle_deg in range(0, 360, 30):
+            angle = math.radians(angle_deg)
+            candidate = (
+                target[0] + math.sin(angle) * ring_distance,
+                target[1] + math.cos(angle) * ring_distance,
+            )
+            if geometry.contains(candidate):
+                points.append(candidate)
+    return _spread_sample_points(points, max_points)
+
+
 def ray_length_within_geometry(
     geometry: ProjectedGeometry,
     start: tuple[float, float],
@@ -1127,42 +1156,97 @@ def plan_coverage(
         geometry, candidate_spacing, max_base_candidates
     )
     physical_candidate_points = _spread_sample_points(
-        base_candidate_points + interior_evaluation_points,
+        base_candidate_points + interior_evaluation_points + boundary_points,
         max_base_candidates,
     )
 
-    candidate_points = []
-    candidate_azimuths_deg = []
-    candidate_site_ids = []
-    for site_id, point in enumerate(physical_candidate_points):
-        for azimuth in azimuth_options:
-            candidate_points.append(point)
-            candidate_azimuths_deg.append(azimuth)
-            candidate_site_ids.append(site_id)
+    def solve_with_sites(candidate_sites):
+        candidate_points = []
+        candidate_azimuths_deg = []
+        candidate_site_ids = []
+        for site_id, point in enumerate(candidate_sites):
+            for azimuth in azimuth_options:
+                candidate_points.append(point)
+                candidate_azimuths_deg.append(azimuth)
+                candidate_site_ids.append(site_id)
+        coverage_sets, candidate_quality_scores = _coverage_sets(
+            candidate_points,
+            candidate_azimuths_deg,
+            evaluation_points,
+            evaluation_weights,
+            radius_m,
+            config,
+            antenna,
+            require_hpbw_redundancy,
+            obstacles,
+        )
+        selected_indices, remaining = _greedy_multicover(
+            coverage_sets,
+            candidate_quality_scores,
+            candidate_points,
+            candidate_site_ids,
+            evaluation_weights,
+            len(evaluation_points),
+            redundancy,
+            minimum_site_separation_m,
+            dispersion_weight,
+            radius_m,
+        )
+        return (
+            candidate_points,
+            candidate_azimuths_deg,
+            candidate_site_ids,
+            coverage_sets,
+            candidate_quality_scores,
+            selected_indices,
+            remaining,
+        )
 
-    coverage_sets, candidate_quality_scores = _coverage_sets(
+    (
         candidate_points,
         candidate_azimuths_deg,
-        evaluation_points,
-        evaluation_weights,
-        radius_m,
-        config,
-        antenna,
-        require_hpbw_redundancy,
-        obstacles,
-    )
-    selected_indices, remaining = _greedy_multicover(
+        candidate_site_ids,
         coverage_sets,
         candidate_quality_scores,
-        candidate_points,
-        candidate_site_ids,
-        evaluation_weights,
-        len(evaluation_points),
-        redundancy,
-        minimum_site_separation_m,
-        dispersion_weight,
-        radius_m,
-    )
+        selected_indices,
+        remaining,
+    ) = solve_with_sites(physical_candidate_points)
+
+    if any(value > 0 for value in remaining):
+        deficient_points = [
+            evaluation_points[index]
+            for index, value in enumerate(remaining)
+            if value > 0
+        ]
+        targeted_sites = _targeted_candidate_points(
+            geometry,
+            deficient_points,
+            radius_m,
+            minimum_site_separation_m,
+            max_base_candidates,
+        )
+        refined_site_limit = min(max_base_candidates * 2, max_candidate_points)
+        refined_sites = _spread_sample_points(
+            physical_candidate_points + targeted_sites + boundary_points,
+            refined_site_limit,
+        )
+        refined_result = solve_with_sites(refined_sites)
+        refined_remaining = refined_result[-1]
+        initial_covered = sum(value == 0 for value in remaining)
+        refined_covered = sum(value == 0 for value in refined_remaining)
+        if refined_covered > initial_covered or (
+            refined_covered == initial_covered
+            and len(refined_result[-2]) < len(selected_indices)
+        ):
+            (
+                candidate_points,
+                candidate_azimuths_deg,
+                candidate_site_ids,
+                coverage_sets,
+                candidate_quality_scores,
+                selected_indices,
+                remaining,
+            ) = refined_result
     covered = sum(1 for value in remaining if value == 0)
     coverage_fraction = covered / len(evaluation_points)
     selected_points = [candidate_points[index] for index in selected_indices]
