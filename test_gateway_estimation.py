@@ -60,6 +60,7 @@ class GatewayEstimationTests(unittest.TestCase):
             "input_payload_ul": 4,
             "input_coverage_enabled": True,
             "input_antenna": "Sectorial 60° × 35°",
+            "input_require_hpbw_redundancy": True,
             "unrelated_key": "ignore",
         }
         captured = capture_estimation_input_state(state)

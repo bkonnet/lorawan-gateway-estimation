@@ -205,6 +205,7 @@ class CoveragePlan:
     candidate_quality_scores: list[float]
     selected_indices: list[int]
     redundancy: int
+    require_hpbw_redundancy: bool
     coverage_fraction: float
     effective_resolution_m: float
     sf_distribution: dict[str, float]
@@ -597,6 +598,21 @@ def antenna_attenuation_db(
     )
 
 
+def link_within_horizontal_hpbw(
+    gateway: tuple[float, float],
+    device: tuple[float, float],
+    azimuth_deg: float,
+    antenna: AntennaConfig,
+) -> bool:
+    """Return whether a link lies inside the antenna's horizontal half-power beam."""
+    if antenna.is_omnidirectional:
+        return True
+    horizontal_delta = abs(
+        _angle_delta_deg(bearing_deg(gateway, device), azimuth_deg)
+    )
+    return horizontal_delta <= antenna.horizontal_beamwidth_deg / 2.0 + 1e-9
+
+
 def link_received_power_dbm(
     gateway: tuple[float, float],
     device: tuple[float, float],
@@ -717,6 +733,7 @@ def _coverage_sets(
     radius_m: float,
     radio: RadioConfig,
     antenna: AntennaConfig,
+    require_hpbw_redundancy: bool,
     obstacles: ProjectedGeometry | None = None,
 ) -> tuple[list[list[int]], list[float]]:
     radius_squared = radius_m * radius_m
@@ -730,6 +747,13 @@ def _coverage_sets(
                 (candidate[0] - point[0]) ** 2
                 + (candidate[1] - point[1]) ** 2
                 > radius_squared
+            ):
+                continue
+            if require_hpbw_redundancy and not link_within_horizontal_hpbw(
+                candidate,
+                point,
+                candidate_azimuths_deg[candidate_index],
+                antenna,
             ):
                 continue
             _, _, limiting_margin_db = link_margins_db(
@@ -837,6 +861,7 @@ def _derive_sf_distribution(
     config: RadioConfig,
     antenna: AntennaConfig,
     redundancy: int,
+    require_hpbw_redundancy: bool,
     obstacles: ProjectedGeometry | None = None,
 ) -> dict[str, float]:
     counts = {sf: 0 for sf in SF_SENSITIVITY_DBM}
@@ -855,9 +880,19 @@ def _derive_sf_distribution(
                         obstacles,
                     )
                     for index, gateway in enumerate(selected_points)
+                    if not require_hpbw_redundancy
+                    or link_within_horizontal_hpbw(
+                        gateway,
+                        point,
+                        selected_azimuths_deg[index],
+                        antenna,
+                    )
                 ),
                 reverse=True,
             )
+            if not powers:
+                counts["SF12"] += 1
+                continue
             rank = min(max(redundancy - 1, 0), len(powers) - 1)
             counts[_sf_for_power(powers[rank], config.fade_margin_db, config)] += 1
     total = max(sum(counts.values()), 1)
@@ -875,7 +910,7 @@ def deployment_link_analysis(
     radius_squared = plan.radius_m * plan.radius_m
     analysis: list[dict[str, float | int]] = []
     for point in plan.evaluation_points:
-        links: list[tuple[float, float, float]] = []
+        links: list[tuple[float, float, float, bool]] = []
         for gateway, azimuth in zip(gateway_points, gateway_azimuths_deg):
             if (
                 (gateway[0] - point[0]) ** 2 + (gateway[1] - point[1]) ** 2
@@ -883,29 +918,46 @@ def deployment_link_analysis(
             ):
                 continue
             links.append(
-                link_margins_db(
-                    gateway,
-                    point,
-                    azimuth,
-                    plan.radio_config,
-                    plan.antenna_config,
-                    plan.obstacles,
+                (
+                    *link_margins_db(
+                        gateway,
+                        point,
+                        azimuth,
+                        plan.radio_config,
+                        plan.antenna_config,
+                        plan.obstacles,
+                    ),
+                    link_within_horizontal_hpbw(
+                        gateway, point, azimuth, plan.antenna_config
+                    ),
                 )
             )
-        links.sort(key=lambda item: item[2], reverse=True)
-        count = sum(
+        radio_count = sum(
             limiting >= plan.radio_config.fade_margin_db
-            for _, _, limiting in links
+            for _, _, limiting, _ in links
         )
+        hpbw_count = sum(
+            limiting >= plan.radio_config.fade_margin_db and within_hpbw
+            for _, _, limiting, within_hpbw in links
+        )
+        eligible_links = [
+            link
+            for link in links
+            if not plan.require_hpbw_redundancy or link[3]
+        ]
+        eligible_links.sort(key=lambda item: item[2], reverse=True)
+        count = hpbw_count if plan.require_hpbw_redundancy else radio_count
         rank = plan.redundancy - 1
-        if len(links) > rank:
-            uplink_margin, downlink_margin, limiting_margin = links[rank]
+        if len(eligible_links) > rank:
+            uplink_margin, downlink_margin, limiting_margin, _ = eligible_links[rank]
             design_surplus = limiting_margin - plan.radio_config.fade_margin_db
         else:
             uplink_margin = downlink_margin = limiting_margin = design_surplus = -math.inf
         analysis.append(
             {
                 "count": count,
+                "radio_count": radio_count,
+                "hpbw_count": hpbw_count,
                 "uplink_margin_db": uplink_margin,
                 "downlink_margin_db": downlink_margin,
                 "limiting_margin_db": limiting_margin,
@@ -1032,6 +1084,7 @@ def plan_coverage(
     obstacles: ProjectedGeometry | None = None,
     max_evaluation_points: int = 3_000,
     max_candidate_points: int = 1_500,
+    require_hpbw_redundancy: bool = True,
 ) -> CoveragePlan:
     antenna = antenna or AntennaConfig(gain_dbi=config.gateway_gain_dbi)
     redundancy = min(max(int(redundancy), 1), 3)
@@ -1081,6 +1134,7 @@ def plan_coverage(
         radius_m,
         config,
         antenna,
+        require_hpbw_redundancy,
         obstacles,
     )
     selected_indices, remaining = _greedy_multicover(
@@ -1106,6 +1160,7 @@ def plan_coverage(
         config,
         antenna,
         redundancy,
+        require_hpbw_redundancy,
         obstacles,
     )
     warnings: list[str] = []
@@ -1115,8 +1170,13 @@ def plan_coverage(
             "para limitar el costo de cálculo."
         )
     if coverage_fraction < 0.999:
+        criterion = (
+            f" redundancia robusta {redundancy}× dentro del HPBW"
+            if require_hpbw_redundancy and not antenna.is_omnidirectional
+            else f" redundancia {redundancy}"
+        )
         warnings.append(
-            f"Solo {coverage_fraction:.1%} de los puntos alcanzó redundancia {redundancy}. "
+            f"Solo {coverage_fraction:.1%} de los puntos alcanzó{criterion}. "
             "Revise el radio, la ubicación permitida de gateways o la resolución."
         )
 
@@ -1136,6 +1196,7 @@ def plan_coverage(
         candidate_quality_scores=candidate_quality_scores,
         selected_indices=selected_indices,
         redundancy=redundancy,
+        require_hpbw_redundancy=require_hpbw_redundancy,
         coverage_fraction=coverage_fraction,
         effective_resolution_m=effective_resolution,
         sf_distribution=sf_distribution,

@@ -13,13 +13,17 @@ from coverage_model import (
     augment_gateway_sites,
     coverage_radius_m,
     deployment_coverage_counts,
+    deployment_link_analysis,
     gateway_sites_geojson,
+    link_within_horizontal_hpbw,
     parse_geojson,
     parse_kml,
     parse_kmz,
     parse_polygon_file,
     plan_coverage,
     ray_length_within_geometry,
+    link_received_power_dbm,
+    obstacle_crossing_count,
 )
 
 
@@ -109,6 +113,73 @@ class CoverageModelTests(unittest.TestCase):
             antenna_attenuation_db(gateway, north, 0.0, antenna),
             antenna_attenuation_db(gateway, south, 0.0, antenna),
         )
+
+    def test_sector_hpbw_uses_half_beamwidth_on_each_side(self):
+        antenna = AntennaConfig(
+            antenna_type="Sectorial",
+            horizontal_beamwidth_deg=60.0,
+            gateway_height_m=1.5,
+            device_height_m=1.5,
+        )
+        gateway = (0.0, 0.0)
+        point_at_30_degrees = (50.0, 50.0 * math.sqrt(3))
+        point_at_31_degrees = (
+            100.0 * math.sin(math.radians(31)),
+            100.0 * math.cos(math.radians(31)),
+        )
+        self.assertTrue(
+            link_within_horizontal_hpbw(
+                gateway, point_at_30_degrees, 0.0, antenna
+            )
+        )
+        self.assertFalse(
+            link_within_horizontal_hpbw(
+                gateway, point_at_31_degrees, 0.0, antenna
+            )
+        )
+
+    def test_strict_redundancy_does_not_count_side_lobes(self):
+        geometry = parse_geojson(SQUARE)
+        antenna = AntennaConfig(
+            antenna_type="Sectorial 60° × 35°",
+            gain_dbi=12.0,
+            horizontal_beamwidth_deg=60.0,
+            vertical_beamwidth_deg=35.0,
+            max_attenuation_db=25.0,
+            gateway_height_m=1.5,
+            device_height_m=1.5,
+        )
+        radio = RadioConfig(
+            tx_eirp_dbm=36.0,
+            gateway_gain_dbi=12.0,
+            gateway_cable_loss_db=0.0,
+            validate_downlink=False,
+            target_sf="SF12",
+            sf_sensitivities_dbm=(-150.0,) * 6,
+            path_loss_exponent=2.0,
+            additional_loss_db=0.0,
+            fade_margin_db=0.0,
+        )
+        plan = plan_coverage(
+            geometry,
+            radio,
+            antenna=antenna,
+            redundancy=1,
+            resolution_m=150,
+            require_hpbw_redundancy=True,
+        )
+        min_x, min_y, max_x, max_y = geometry.bounds
+        gateway = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+        analysis = deployment_link_analysis(plan, [gateway], [0.0])
+        side_lobe_results = [
+            item
+            for point, item in zip(plan.evaluation_points, analysis)
+            if not link_within_horizontal_hpbw(gateway, point, 0.0, antenna)
+        ]
+        self.assertTrue(side_lobe_results)
+        self.assertTrue(all(item["count"] == 0 for item in side_lobe_results))
+        self.assertTrue(all(item["hpbw_count"] == 0 for item in side_lobe_results))
+        self.assertTrue(any(item["radio_count"] == 1 for item in side_lobe_results))
 
     def test_sector_plan_exports_azimuths(self):
         geometry = parse_geojson(SQUARE)
@@ -305,6 +376,69 @@ class CoverageModelTests(unittest.TestCase):
         exported = gateway_sites_geojson(sites, geometry.projection)
         self.assertEqual(exported["type"], "FeatureCollection")
         self.assertEqual(len(exported["features"]), len(sites))
+
+    def test_custom_gateway_sensitivity_changes_range(self):
+        default_radius = coverage_radius_m(RadioConfig(validate_downlink=False))
+        conservative = RadioConfig(
+            validate_downlink=False,
+            sf_sensitivities_dbm=(-115, -118, -120, -122, -124, -126),
+        )
+        self.assertLess(coverage_radius_m(conservative), default_radius)
+
+    def test_downlink_can_limit_bidirectional_range(self):
+        uplink_only = RadioConfig(validate_downlink=False)
+        bidirectional = RadioConfig(
+            validate_downlink=True,
+            gateway_tx_eirp_dbm=10,
+            device_receiver_sensitivity_dbm=-105,
+        )
+        self.assertLess(coverage_radius_m(bidirectional), coverage_radius_m(uplink_only))
+
+    def test_device_installation_loss_reduces_uplink_power(self):
+        antenna = AntennaConfig()
+        gateway = (0.0, 0.0)
+        device = (0.0, 200.0)
+        baseline = link_received_power_dbm(
+            gateway, device, 0.0, RadioConfig(device_installation_loss_db=0), antenna
+        )
+        installed = link_received_power_dbm(
+            gateway, device, 0.0, RadioConfig(device_installation_loss_db=7), antenna
+        )
+        self.assertAlmostEqual(baseline - installed, 7.0)
+
+    def test_container_polygon_adds_loss_when_path_crosses_it(self):
+        area = parse_geojson(SQUARE)
+        obstacle_data = {
+            "type": "Polygon",
+            "coordinates": [[
+                [-96.701, 33.005], [-96.699, 33.005],
+                [-96.699, 33.015], [-96.701, 33.015],
+                [-96.701, 33.005],
+            ]],
+        }
+        obstacles = parse_geojson(obstacle_data, projection=area.projection)
+        west = area.projection.forward(-96.704, 33.010)
+        east = area.projection.forward(-96.696, 33.010)
+        self.assertEqual(obstacle_crossing_count(west, east, obstacles), 1)
+        antenna = AntennaConfig(gateway_height_m=1.5, device_height_m=1.5)
+        config = RadioConfig(obstacle_loss_db=9, maximum_obstacle_loss_db=30)
+        clear = link_received_power_dbm(west, east, 90, config, antenna)
+        blocked = link_received_power_dbm(west, east, 90, config, antenna, obstacles)
+        self.assertAlmostEqual(clear - blocked, 9.0)
+
+    def test_link_analysis_reports_margin_for_redundancy_gateway(self):
+        geometry = parse_geojson(SQUARE)
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(validate_downlink=True),
+            redundancy=2,
+            resolution_m=150,
+        )
+        analysis = deployment_link_analysis(
+            plan, plan.selected_points, plan.selected_azimuths_deg
+        )
+        self.assertEqual(len(analysis), len(plan.evaluation_points))
+        self.assertTrue(all("design_surplus_db" in item for item in analysis))
 
 
 if __name__ == "__main__":

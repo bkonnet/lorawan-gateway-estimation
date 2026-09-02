@@ -304,6 +304,8 @@ La atenuación por bloque no es universal: debe calibrarse con mediciones en el 
 
 El campo **Gateways mínimos por punto** exige que cada punto supere la sensibilidad más el margen requerido con 1, 2 o 3 gateways físicamente distintos. Si se exige enlace bidireccional, ambos sentidos deben cumplir. Para una red crítica se recomienda comenzar con 2.
 
+La opción **Exigir redundancia dentro del HPBW horizontal** evita considerar un lóbulo lateral o posterior como enlace redundante robusto. Está habilitada por defecto: el optimizador debe orientar hacia el punto el haz principal de cada gateway contado. En el mapa, verde significa redundancia robusta dentro del HPBW, amarillo indica redundancia RF que depende de al menos un lóbulo lateral y rojo indica que ni siquiera el link budget alcanza la redundancia requerida.
+
 ### Antenas y orientación
 
 Cada gateway se modela con una antena. La aplicación incluye estos perfiles iniciales:
@@ -328,10 +330,11 @@ Los valores deben reemplazarse por la ficha técnica o, idealmente, por los patr
 3. Muestrea el polígono en una cuadrícula configurable.
 4. Aplica sensibilidad por SF, margen de diseño y pérdida de montaje del dispositivo.
 5. Aplica el patrón horizontal/vertical, altura, downtilt y obstáculos atravesados.
-6. Selecciona ubicaciones y azimuts preliminares mediante un algoritmo greedy multi-cover.
-7. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
-8. Reporta cobertura 2×, margen mínimo y percentil 10 del margen.
-9. Calcula el resultado final como el máximo entre capacidad y cobertura.
+6. Si está habilitado el criterio HPBW, descarta como redundancia robusta los enlaces fuera del haz principal horizontal.
+7. Selecciona ubicaciones y azimuts preliminares mediante un algoritmo greedy multi-cover.
+8. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
+9. Reporta cobertura robusta, cobertura RF incluyendo lóbulos laterales, margen mínimo y percentil 10 del margen.
+10. Calcula el resultado final como el máximo entre capacidad y cobertura.
 
 ```text
 Gateways finales = MAX(gateways por capacidad, gateways por cobertura)
@@ -566,6 +569,7 @@ Pérdida montaje/puerta: 6 dB inicialmente
 Margen RF: 20 dB inicialmente
 Cobertura bidireccional: habilitada
 Gateways mínimos por punto: 2
+Redundancia dentro del HPBW horizontal: habilitada
 ```
 
 ---

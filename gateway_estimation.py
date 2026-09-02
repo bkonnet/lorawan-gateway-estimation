@@ -114,6 +114,7 @@ ESTIMATION_WIDGET_KEYS = (
     "input_environment",
     "input_antenna",
     "input_redundancy",
+    "input_require_hpbw_redundancy",
     "input_target_sf",
     "input_tx_eirp",
     "input_device_antenna_gain",
@@ -914,6 +915,17 @@ def app_streamlit():
                 key="input_downtilt",
             )
 
+        require_hpbw_redundancy = st.checkbox(
+            "Exigir redundancia dentro del HPBW horizontal",
+            value=True,
+            key="input_require_hpbw_redundancy",
+            help=(
+                "Para antenas sectoriales o direccionales, cada gateway que cuenta para la "
+                "redundancia debe apuntar al punto dentro de su haz principal. Los enlaces "
+                "laterales pueden mostrarse en el mapa, pero no satisfacen la redundancia robusta."
+            ),
+        )
+
         st.markdown("##### Dispositivo, sensibilidades y enlace de retorno")
         device_col1, device_col2, device_col3, device_col4 = st.columns(4)
         with device_col1:
@@ -1148,6 +1160,7 @@ def app_streamlit():
                     radio_config,
                     antenna=antenna_config,
                     redundancy=int(redundancy),
+                    require_hpbw_redundancy=bool(require_hpbw_redundancy),
                     resolution_m=float(resolution_m),
                     minimum_site_separation_m=float(minimum_site_separation),
                     edge_priority=float(edge_priority),
@@ -1165,7 +1178,8 @@ def app_streamlit():
                     f" Referencia isotrópica 0 dBi: {coverage_plan.isotropic_radius_m:.0f} m."
                     f" Verificación: {len(coverage_plan.evaluation_points)} puntos, incluyendo "
                     f"{coverage_plan.boundary_point_count} puntos específicos de perímetro. "
-                    f"Enlace exigido: {'uplink + downlink' if validate_downlink else 'solo uplink'}."
+                    f"Enlace exigido: {'uplink + downlink' if validate_downlink else 'solo uplink'}. "
+                    f"Redundancia: {'dentro del HPBW horizontal' if require_hpbw_redundancy else 'por link budget, incluidos lóbulos laterales'}."
                 )
                 if coverage_obstacles is not None:
                     st.caption(
@@ -1233,6 +1247,7 @@ def app_streamlit():
                             comparison_radio,
                             antenna=comparison_antenna,
                             redundancy=int(redundancy),
+                            require_hpbw_redundancy=bool(require_hpbw_redundancy),
                             resolution_m=float(resolution_m),
                             minimum_site_separation_m=float(minimum_site_separation),
                             edge_priority=float(edge_priority),
@@ -1354,13 +1369,25 @@ def app_streamlit():
             final_coverage_counts = [
                 int(item["count"]) for item in final_link_analysis
             ]
+            final_radio_counts = [
+                int(item["radio_count"]) for item in final_link_analysis
+            ]
             covered_evaluation_points = sum(
                 count >= coverage_plan.redundancy
                 for count in final_coverage_counts
             )
+            radio_covered_evaluation_points = sum(
+                count >= coverage_plan.redundancy
+                for count in final_radio_counts
+            )
             final_coverage_fraction = (
                 covered_evaluation_points / len(final_coverage_counts)
                 if final_coverage_counts
+                else 0.0
+            )
+            final_radio_coverage_fraction = (
+                radio_covered_evaluation_points / len(final_radio_counts)
+                if final_radio_counts
                 else 0.0
             )
             all_surpluses = sorted(
@@ -1378,7 +1405,7 @@ def app_streamlit():
                 if all_surpluses
                 else -math.inf
             )
-            verification_col1, verification_col2, verification_col3, verification_col4, verification_col5 = st.columns(5)
+            verification_col1, verification_col2, verification_col3, verification_col4, verification_col5, verification_col6 = st.columns(6)
             verification_col1.metric(
                 "Cobertura final verificada",
                 f"{final_coverage_fraction:.1%}",
@@ -1392,11 +1419,16 @@ def app_streamlit():
                 f"{coverage_plan.redundancy} gateways",
             )
             verification_col4.metric(
+                "RF incl. laterales",
+                f"{final_radio_coverage_fraction:.1%}",
+                help="Cobertura con link budget suficiente aunque algún enlace quede fuera del HPBW principal.",
+            )
+            verification_col5.metric(
                 "Margen mínimo vs diseño",
                 f"{minimum_surplus:.1f} dB" if math.isfinite(minimum_surplus) else "sin enlace",
                 help="Margen del gateway que completa la redundancia, después de descontar el margen de diseño.",
             )
-            verification_col5.metric(
+            verification_col6.metric(
                 "Margen P10 vs diseño",
                 f"{percentile_10_surplus:.1f} dB" if math.isfinite(percentile_10_surplus) else "sin enlace",
             )
@@ -1422,7 +1454,8 @@ def app_streamlit():
             else:
                 st.error(
                     f"Hay {len(final_coverage_counts) - covered_evaluation_points} puntos de evaluación "
-                    "que todavía no cumplen la redundancia. Las zonas se muestran en rojo en el mapa."
+                    "que todavía no cumplen la redundancia robusta. Las zonas dependientes de lóbulos "
+                    "laterales se muestran en amarillo y las que no tienen redundancia RF, en rojo."
                 )
             sites_df = pd.DataFrame(
                 [
@@ -1453,7 +1486,7 @@ def app_streamlit():
                         value=True,
                         disabled=coverage_plan.antenna_config.is_omnidirectional,
                     )
-                fig_cov, ax_cov = plt.subplots(figsize=(9, 7))
+                fig_cov, ax_cov = plt.subplots(figsize=(11, 7))
                 footprint_color = "tab:blue"
                 for polygon in coverage_geometry.polygons:
                     for ring_index, ring in enumerate(polygon):
@@ -1531,13 +1564,23 @@ def app_streamlit():
                         )
                         if count >= coverage_plan.redundancy
                     ]
-                    deficient_points = [
+                    lateral_points = [
                         point
-                        for point, count in zip(
+                        for point, robust_count, radio_count in zip(
                             coverage_plan.evaluation_points,
                             final_coverage_counts,
+                            final_radio_counts,
                         )
-                        if count < coverage_plan.redundancy
+                        if robust_count < coverage_plan.redundancy
+                        and radio_count >= coverage_plan.redundancy
+                    ]
+                    deficient_points = [
+                        point
+                        for point, radio_count in zip(
+                            coverage_plan.evaluation_points,
+                            final_radio_counts,
+                        )
+                        if radio_count < coverage_plan.redundancy
                     ]
                     if compliant_points:
                         ax_cov.scatter(
@@ -1548,6 +1591,16 @@ def app_streamlit():
                             s=12,
                             alpha=0.45,
                             zorder=2,
+                        )
+                    if lateral_points:
+                        ax_cov.scatter(
+                            [point[0] for point in lateral_points],
+                            [point[1] for point in lateral_points],
+                            color="darkorange",
+                            marker="o",
+                            s=14,
+                            alpha=0.65,
+                            zorder=3,
                         )
                     if deficient_points:
                         ax_cov.scatter(
@@ -1624,7 +1677,16 @@ def app_streamlit():
                         [
                             Line2D(
                                 [0], [0], marker=".", color="tab:green", linestyle="none",
-                                markersize=8, label="Cumple redundancia",
+                                markersize=8,
+                                label=(
+                                    "Redundancia robusta HPBW"
+                                    if coverage_plan.require_hpbw_redundancy
+                                    else "Cumple redundancia RF"
+                                ),
+                            ),
+                            Line2D(
+                                [0], [0], marker="o", color="darkorange", linestyle="none",
+                                markersize=5, label="Solo lóbulos laterales",
                             ),
                             Line2D(
                                 [0], [0], marker="x", color="tab:red", linestyle="none",
@@ -1652,13 +1714,21 @@ def app_streamlit():
                             label="Bloques de contenedores",
                         )
                     )
-                ax_cov.legend(handles=legend_handles, fontsize=8, loc="best")
+                ax_cov.legend(
+                    handles=legend_handles,
+                    fontsize=8,
+                    loc="upper left",
+                    bbox_to_anchor=(1.02, 1.0),
+                    borderaxespad=0.0,
+                )
+                fig_cov.subplots_adjust(right=0.72)
                 st.pyplot(fig_cov)
                 plt.close(fig_cov)
                 st.caption(
                     "La figura azul representa la huella nominal al HPBW y alcance máximo en boresight. "
-                    "Los puntos verdes/rojos son la validación efectiva del link budget, incluyendo patrón "
-                    "horizontal/vertical, pérdidas, margen y redundancia."
+                    "Verde exige redundancia dentro del HPBW; amarillo conserva redundancia RF solamente "
+                    "mediante uno o más lóbulos laterales; rojo no alcanza la redundancia por link budget. "
+                    "La leyenda se muestra fuera del área evaluada."
                 )
 
             sites_geojson = gateway_sites_geojson(
@@ -1733,6 +1803,11 @@ def app_streamlit():
                 "Superficie": f"{coverage_plan.area_m2 / 1_000_000:.3f} km2",
                 "Ambiente RF": environment_name,
                 "Redundancia requerida": int(redundancy),
+                "Criterio de redundancia": (
+                    "Dentro del HPBW horizontal"
+                    if require_hpbw_redundancy
+                    else "Link budget incluyendo lóbulos laterales"
+                ),
                 "Separación mínima entre sitios": f"{minimum_site_separation:.0f} m",
                 "Estrategia espacial": strategy_name,
                 "Prioridad del perímetro": float(edge_priority),
@@ -1750,6 +1825,7 @@ def app_streamlit():
                 "Radio máximo en boresight": f"{coverage_plan.radius_m:.0f} m",
                 "Radio isotrópico de referencia (0 dBi)": f"{coverage_plan.isotropic_radius_m:.0f} m",
                 "Cobertura final verificada": f"{final_coverage_fraction:.1%}",
+                "Cobertura RF incluyendo lóbulos laterales": f"{final_radio_coverage_fraction:.1%}",
                 "Tipo de antena": antenna_name,
                 "Ganancia": f"{gateway_gain:.1f} dBi",
                 "HPBW horizontal / vertical": f"{horizontal_beamwidth:.0f}° / {vertical_beamwidth:.0f}°",
@@ -1775,7 +1851,7 @@ def app_streamlit():
             }
 
         current_snapshot = {
-            "snapshot_version": 3,
+            "snapshot_version": 4,
             "name": "Estimación actual",
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "input_state": capture_estimation_input_state(st.session_state),
