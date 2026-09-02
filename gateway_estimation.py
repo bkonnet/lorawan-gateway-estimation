@@ -11,7 +11,7 @@ from coverage_model import (
     AntennaConfig,
     RadioConfig,
     augment_gateway_deployments,
-    deployment_coverage_counts,
+    deployment_link_analysis,
     gateway_sites_geojson,
     parse_polygon_file,
     plan_coverage,
@@ -116,6 +116,11 @@ ESTIMATION_WIDGET_KEYS = (
     "input_redundancy",
     "input_target_sf",
     "input_tx_eirp",
+    "input_device_antenna_gain",
+    "input_device_installation_loss",
+    "input_gateway_tx_eirp",
+    "input_device_sensitivity",
+    "input_validate_downlink",
     "input_gateway_gain",
     "input_cable_loss",
     "input_horizontal_beamwidth",
@@ -129,10 +134,18 @@ ESTIMATION_WIDGET_KEYS = (
     "input_path_loss_exponent",
     "input_additional_loss",
     "input_fade_margin",
+    "input_obstacle_loss",
+    "input_maximum_obstacle_loss",
     "input_strategy",
     "input_edge_priority",
     "input_dispersion_weight",
     "input_use_coverage_distribution",
+    "input_sensitivity_SF7",
+    "input_sensitivity_SF8",
+    "input_sensitivity_SF9",
+    "input_sensitivity_SF10",
+    "input_sensitivity_SF11",
+    "input_sensitivity_SF12",
 )
 
 
@@ -425,14 +438,14 @@ def estimar_gateways(
             ),
             "Payload app UL": payload_uplink_bytes,
             "Payload físico UL": payload_fisico_uplink(payload_uplink_bytes, fopts_uplink_bytes),
-            "ToA UL (s)": "",
-            "ToA UL (ms)": "",
+            "ToA UL (s)": None,
+            "ToA UL (ms)": None,
             "Dwell OK UL": "",
             "Carga uplink": round(carga_uplink_total, 3),
             "SF DL RX1": "",
-            "ToA ACK RX1 (s)": "",
-            "ToA ACK RX2 (s)": "",
-            "ToA ACK pond. (s)": "",
+            "ToA ACK RX1 (s)": None,
+            "ToA ACK RX2 (s)": None,
+            "ToA ACK pond. (s)": None,
             "ACK/downlink attempts hora": round(ack_attempts_hora_total, 1),
             "Airtime ACK s/h": round(airtime_ack_total_s_hora, 1),
             "Bloqueo RX por ACK": round(blocking_total, 4),
@@ -700,10 +713,13 @@ def app_streamlit():
     use_coverage_distribution = False
     polygon_name = None
     polygon_bytes = None
+    obstacle_name = None
+    obstacle_bytes = None
 
     if coverage_enabled:
         st.info(
-            "La planificación propone sitios dentro del polígono con un modelo isotrópico. "
+            "La planificación propone sitios dentro del polígono y valida el link budget "
+            "punto por punto, incluyendo patrón de antena, sensibilidad, margen y obstáculos. "
             "En contenedores debe calibrarse posteriormente con mediciones RSSI/SNR.",
             icon="🗺️",
         )
@@ -742,6 +758,42 @@ def app_streamlit():
         else:
             polygon_name = None
             polygon_bytes = None
+
+        def obstacle_upload_changed():
+            st.session_state["_prefer_restored_obstacles"] = False
+
+        obstacle_file = st.file_uploader(
+            "Filas/bloques de contenedores (opcional: KMZ, KML o GeoJSON)",
+            type=["kmz", "kml", "geojson", "json"],
+            key="obstacle_upload",
+            on_change=obstacle_upload_changed,
+            help=(
+                "Cada polígono se interpreta como un obstáculo distinto. El enlace recibe "
+                "la pérdida configurada por cada bloque que atraviesa."
+            ),
+        )
+        prefer_restored_obstacles = st.session_state.get(
+            "_prefer_restored_obstacles", False
+        )
+        active_obstacles = st.session_state.get("_active_obstacles")
+        if prefer_restored_obstacles and active_obstacles:
+            obstacle_name = active_obstacles["name"]
+            obstacle_bytes = base64.b64decode(active_obstacles["data_base64"])
+            st.info(f"Obstáculos restaurados: {obstacle_name}")
+        elif prefer_restored_obstacles:
+            obstacle_name = None
+            obstacle_bytes = None
+        elif obstacle_file is not None:
+            obstacle_name = obstacle_file.name
+            obstacle_bytes = obstacle_file.getvalue()
+            st.session_state["_active_obstacles"] = {
+                "name": obstacle_name,
+                "data_base64": base64.b64encode(obstacle_bytes).decode("ascii"),
+            }
+        elif active_obstacles:
+            obstacle_name = active_obstacles["name"]
+            obstacle_bytes = base64.b64decode(active_obstacles["data_base64"])
+            st.info(f"Obstáculos restaurados: {obstacle_name}")
         def environment_preset_changed():
             environment_state = environment_preset_input_state(
                 st.session_state["input_environment"]
@@ -795,12 +847,13 @@ def app_streamlit():
             )
         with cov2:
             tx_eirp = st.number_input(
-                "EIRP del dispositivo (dBm)",
+                "Potencia TX conducida del dispositivo (dBm)",
                 0.0,
                 36.0,
                 20.0,
                 1.0,
                 key="input_tx_eirp",
+                help="Potencia en el conector RF, antes de la ganancia y pérdidas de instalación.",
             )
             gateway_gain = st.number_input(
                 "Ganancia máxima de antena (dBi)",
@@ -861,6 +914,83 @@ def app_streamlit():
                 key="input_downtilt",
             )
 
+        st.markdown("##### Dispositivo, sensibilidades y enlace de retorno")
+        device_col1, device_col2, device_col3, device_col4 = st.columns(4)
+        with device_col1:
+            device_antenna_gain = st.number_input(
+                "Ganancia antena dispositivo (dBi)",
+                -20.0,
+                15.0,
+                0.0,
+                0.5,
+                key="input_device_antenna_gain",
+                help="Para el ZRSM comenzar con 0 dBi si no existe una medición mejor.",
+            )
+        with device_col2:
+            device_installation_loss = st.number_input(
+                "Pérdida instalación/puerta (dB)",
+                0.0,
+                40.0,
+                6.0,
+                0.5,
+                key="input_device_installation_loss",
+                help="Pérdida efectiva por montaje sobre metal, orientación y encapsulado.",
+            )
+        with device_col3:
+            gateway_tx_eirp = st.number_input(
+                "EIRP downlink gateway (dBm)",
+                0.0,
+                36.0,
+                30.0,
+                1.0,
+                key="input_gateway_tx_eirp",
+            )
+        with device_col4:
+            device_sensitivity = st.number_input(
+                "Sensibilidad RX del dispositivo (dBm)",
+                -150.0,
+                -80.0,
+                -129.0,
+                1.0,
+                key="input_device_sensitivity",
+                help="Usar el valor de la ficha técnica para el DR del ACK/RX1 o RX2.",
+            )
+        validate_downlink = st.checkbox(
+            "Exigir cobertura bidireccional para ACK/downlink",
+            value=confirmed_ratio > 0,
+            key="input_validate_downlink",
+            help=(
+                "Un punto solo cumple si tanto el uplink como el downlink superan sensibilidad "
+                "más margen. Desactívelo únicamente para tráfico no confirmado sin comandos."
+            ),
+        )
+
+        with st.expander("Sensibilidad del gateway por SF (BW125)"):
+            st.caption(
+                "Reemplace estos valores genéricos por la ficha técnica del gateway completo. "
+                "El SF máximo de diseño usa el valor correspondiente de esta tabla."
+            )
+            default_sensitivities = {
+                "SF7": -123.0,
+                "SF8": -126.0,
+                "SF9": -129.0,
+                "SF10": -132.0,
+                "SF11": -134.5,
+                "SF12": -137.0,
+            }
+            sensitivity_cols = st.columns(6)
+            sf_sensitivities = {}
+            for sensitivity_col, sf_label in zip(sensitivity_cols, SF_ORDER):
+                with sensitivity_col:
+                    sf_sensitivities[sf_label] = st.number_input(
+                        sf_label,
+                        -150.0,
+                        -80.0,
+                        default_sensitivities[sf_label],
+                        0.5,
+                        key=f"input_sensitivity_{sf_label}",
+                    )
+
         rf1, rf2, rf3, rf4 = st.columns(4)
         with rf1:
             resolution_m = st.number_input(
@@ -902,6 +1032,29 @@ def app_streamlit():
                 float(environment["fade_margin_db"]),
                 1.0,
                 key="input_fade_margin",
+            )
+
+        obstacle_col1, obstacle_col2 = st.columns(2)
+        with obstacle_col1:
+            obstacle_loss = st.number_input(
+                "Pérdida por bloque/fila atravesada (dB)",
+                0.0,
+                40.0,
+                8.0,
+                0.5,
+                key="input_obstacle_loss",
+                disabled=obstacle_bytes is None,
+                help="Se aplica una vez por cada polígono de obstáculos cruzado por el enlace.",
+            )
+        with obstacle_col2:
+            maximum_obstacle_loss = st.number_input(
+                "Pérdida máxima acumulada por obstáculos (dB)",
+                0.0,
+                80.0,
+                32.0,
+                1.0,
+                key="input_maximum_obstacle_loss",
+                disabled=obstacle_bytes is None,
             )
 
         strategy_name = st.selectbox(
@@ -949,14 +1102,36 @@ def app_streamlit():
                 coverage_geometry = parse_polygon_file(
                     polygon_name, polygon_bytes
                 )
+                coverage_obstacles = (
+                    parse_polygon_file(
+                        obstacle_name,
+                        obstacle_bytes,
+                        projection=coverage_geometry.projection,
+                    )
+                    if obstacle_name and obstacle_bytes is not None
+                    else None
+                )
                 radio_config = RadioConfig(
                     tx_eirp_dbm=float(tx_eirp),
+                    device_antenna_gain_dbi=float(device_antenna_gain),
+                    device_installation_loss_db=float(device_installation_loss),
                     gateway_gain_dbi=float(gateway_gain),
                     gateway_cable_loss_db=float(cable_loss),
+                    gateway_tx_eirp_dbm=float(gateway_tx_eirp),
+                    device_receiver_sensitivity_dbm=float(device_sensitivity),
+                    validate_downlink=bool(validate_downlink),
                     target_sf=target_sf,
+                    sf_sensitivities_dbm=tuple(
+                        float(sf_sensitivities[sf_label])
+                        for sf_label in SF_ORDER
+                    ),
                     path_loss_exponent=float(path_loss_exponent),
                     additional_loss_db=float(additional_loss),
                     fade_margin_db=float(fade_margin),
+                    obstacle_loss_db=(
+                        float(obstacle_loss) if coverage_obstacles is not None else 0.0
+                    ),
+                    maximum_obstacle_loss_db=float(maximum_obstacle_loss),
                 )
                 antenna_config = AntennaConfig(
                     antenna_type=antenna_name,
@@ -977,6 +1152,7 @@ def app_streamlit():
                     minimum_site_separation_m=float(minimum_site_separation),
                     edge_priority=float(edge_priority),
                     dispersion_weight=float(dispersion_weight),
+                    obstacles=coverage_obstacles,
                 )
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Superficie", f"{coverage_plan.area_m2 / 1_000_000:.2f} km²")
@@ -988,8 +1164,14 @@ def app_streamlit():
                     f"HPBW {horizontal_beamwidth:.0f}° × {vertical_beamwidth:.0f}° y downtilt {downtilt:.0f}°."
                     f" Referencia isotrópica 0 dBi: {coverage_plan.isotropic_radius_m:.0f} m."
                     f" Verificación: {len(coverage_plan.evaluation_points)} puntos, incluyendo "
-                    f"{coverage_plan.boundary_point_count} puntos específicos de perímetro."
+                    f"{coverage_plan.boundary_point_count} puntos específicos de perímetro. "
+                    f"Enlace exigido: {'uplink + downlink' if validate_downlink else 'solo uplink'}."
                 )
+                if coverage_obstacles is not None:
+                    st.caption(
+                        f"Obstáculos: {len(coverage_obstacles.polygons)} bloques, "
+                        f"{obstacle_loss:.1f} dB por cruce, máximo {maximum_obstacle_loss:.1f} dB."
+                    )
 
                 for warning in coverage_plan.warnings:
                     st.warning(warning)
@@ -1024,12 +1206,27 @@ def app_streamlit():
                         )
                         comparison_radio = RadioConfig(
                             tx_eirp_dbm=float(tx_eirp),
+                            device_antenna_gain_dbi=float(device_antenna_gain),
+                            device_installation_loss_db=float(device_installation_loss),
                             gateway_gain_dbi=comparison_antenna.gain_dbi,
                             gateway_cable_loss_db=float(cable_loss),
+                            gateway_tx_eirp_dbm=float(gateway_tx_eirp),
+                            device_receiver_sensitivity_dbm=float(device_sensitivity),
+                            validate_downlink=bool(validate_downlink),
                             target_sf=target_sf,
+                            sf_sensitivities_dbm=tuple(
+                                float(sf_sensitivities[sf_label])
+                                for sf_label in SF_ORDER
+                            ),
                             path_loss_exponent=float(path_loss_exponent),
                             additional_loss_db=float(additional_loss),
                             fade_margin_db=float(fade_margin),
+                            obstacle_loss_db=(
+                                float(obstacle_loss)
+                                if coverage_obstacles is not None
+                                else 0.0
+                            ),
+                            maximum_obstacle_loss_db=float(maximum_obstacle_loss),
                         )
                         comparison_plan = plan_coverage(
                             coverage_geometry,
@@ -1040,6 +1237,7 @@ def app_streamlit():
                             minimum_site_separation_m=float(minimum_site_separation),
                             edge_priority=float(edge_priority),
                             dispersion_weight=float(dispersion_weight),
+                            obstacles=coverage_obstacles,
                         )
                         comparison_rows.append(
                             {
@@ -1075,7 +1273,7 @@ def app_streamlit():
                         hide_index=True,
                     )
             except Exception as coverage_exc:
-                st.error(f"No fue posible procesar el polígono: {coverage_exc}")
+                st.error(f"No fue posible procesar la cobertura RF: {coverage_exc}")
 
     with st.expander("📋 Tabla de mapeo DR AU915 usada por el modelo"):
         tabla_dr = pd.DataFrame(
@@ -1150,9 +1348,12 @@ def app_streamlit():
                     "resolución espacial de candidatos o habilite ubicaciones adicionales."
                 )
             lon_lat_sites = points_to_lon_lat(final_sites, coverage_geometry.projection)
-            final_coverage_counts = deployment_coverage_counts(
+            final_link_analysis = deployment_link_analysis(
                 coverage_plan, final_sites, final_azimuths
             )
+            final_coverage_counts = [
+                int(item["count"]) for item in final_link_analysis
+            ]
             covered_evaluation_points = sum(
                 count >= coverage_plan.redundancy
                 for count in final_coverage_counts
@@ -1162,7 +1363,22 @@ def app_streamlit():
                 if final_coverage_counts
                 else 0.0
             )
-            verification_col1, verification_col2, verification_col3 = st.columns(3)
+            all_surpluses = sorted(
+                float(item["design_surplus_db"])
+                for item in final_link_analysis
+            )
+            minimum_surplus = all_surpluses[0] if all_surpluses else -math.inf
+            percentile_10_index = (
+                min(int((len(all_surpluses) - 1) * 0.10), len(all_surpluses) - 1)
+                if all_surpluses
+                else 0
+            )
+            percentile_10_surplus = (
+                all_surpluses[percentile_10_index]
+                if all_surpluses
+                else -math.inf
+            )
+            verification_col1, verification_col2, verification_col3, verification_col4, verification_col5 = st.columns(5)
             verification_col1.metric(
                 "Cobertura final verificada",
                 f"{final_coverage_fraction:.1%}",
@@ -1175,6 +1391,30 @@ def app_streamlit():
                 "Redundancia exigida",
                 f"{coverage_plan.redundancy} gateways",
             )
+            verification_col4.metric(
+                "Margen mínimo vs diseño",
+                f"{minimum_surplus:.1f} dB" if math.isfinite(minimum_surplus) else "sin enlace",
+                help="Margen del gateway que completa la redundancia, después de descontar el margen de diseño.",
+            )
+            verification_col5.metric(
+                "Margen P10 vs diseño",
+                f"{percentile_10_surplus:.1f} dB" if math.isfinite(percentile_10_surplus) else "sin enlace",
+            )
+            finite_rank_links = [
+                item
+                for item in final_link_analysis
+                if math.isfinite(float(item["limiting_margin_db"]))
+            ]
+            if validate_downlink and finite_rank_links:
+                downlink_bottlenecks = sum(
+                    float(item["downlink_margin_db"])
+                    <= float(item["uplink_margin_db"])
+                    for item in finite_rank_links
+                )
+                st.caption(
+                    f"En {downlink_bottlenecks / len(finite_rank_links):.1%} de los puntos "
+                    "el enlace limitante es el downlink; en el resto es el uplink."
+                )
             if final_coverage_fraction >= 0.999:
                 st.success(
                     "Todos los puntos de evaluación del polígono cumplen la redundancia requerida."
@@ -1224,6 +1464,19 @@ def app_streamlit():
                             ys,
                             color="black" if ring_index == 0 else "gray",
                             linewidth=1.5,
+                        )
+                if coverage_plan.obstacles is not None:
+                    for obstacle_polygon in coverage_plan.obstacles.polygons:
+                        outer = obstacle_polygon[0]
+                        ax_cov.fill(
+                            [point[0] for point in outer],
+                            [point[1] for point in outer],
+                            facecolor="tab:orange",
+                            edgecolor="darkorange",
+                            linewidth=0.8,
+                            alpha=0.22,
+                            hatch="///",
+                            zorder=1,
                         )
                 for point, azimuth in zip(final_sites, final_azimuths):
                     if coverage_plan.antenna_config.is_omnidirectional:
@@ -1389,6 +1642,16 @@ def app_streamlit():
                             linewidth=1, label="Referencia isotrópica 0 dBi",
                         )
                     )
+                if coverage_plan.obstacles is not None:
+                    legend_handles.append(
+                        Patch(
+                            facecolor="tab:orange",
+                            edgecolor="darkorange",
+                            alpha=0.25,
+                            hatch="///",
+                            label="Bloques de contenedores",
+                        )
+                    )
                 ax_cov.legend(handles=legend_handles, fontsize=8, loc="best")
                 st.pyplot(fig_cov)
                 plt.close(fig_cov)
@@ -1477,6 +1740,13 @@ def app_streamlit():
                 "Puntos de evaluación del perímetro": coverage_plan.boundary_point_count,
                 "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
                 "SF máximo de diseño": target_sf,
+                "Sensibilidad gateway objetivo": f"{radio_config.receiver_sensitivity_dbm:.1f} dBm",
+                "Enlace exigido": "Uplink + downlink" if validate_downlink else "Solo uplink",
+                "Potencia TX dispositivo": f"{tx_eirp:.1f} dBm",
+                "Ganancia antena dispositivo": f"{device_antenna_gain:.1f} dBi",
+                "Pérdida instalación/puerta": f"{device_installation_loss:.1f} dB",
+                "EIRP downlink gateway": f"{gateway_tx_eirp:.1f} dBm",
+                "Sensibilidad RX dispositivo": f"{device_sensitivity:.1f} dBm",
                 "Radio máximo en boresight": f"{coverage_plan.radius_m:.0f} m",
                 "Radio isotrópico de referencia (0 dBi)": f"{coverage_plan.isotropic_radius_m:.0f} m",
                 "Cobertura final verificada": f"{final_coverage_fraction:.1%}",
@@ -1487,10 +1757,25 @@ def app_streamlit():
                 "Altura gateway / dispositivo": f"{gateway_height:.1f} m / {device_height:.1f} m",
                 "Pérdida adicional ambiente": f"{additional_loss:.1f} dB",
                 "Margen de desvanecimiento": f"{fade_margin:.1f} dB",
+                "Margen mínimo vs diseño": (
+                    f"{minimum_surplus:.1f} dB"
+                    if math.isfinite(minimum_surplus)
+                    else "Sin enlace redundante"
+                ),
+                "Margen P10 vs diseño": (
+                    f"{percentile_10_surplus:.1f} dB"
+                    if math.isfinite(percentile_10_surplus)
+                    else "Sin enlace redundante"
+                ),
+                "Obstáculos": (
+                    f"{len(coverage_plan.obstacles.polygons)} bloques, {obstacle_loss:.1f} dB/cruce"
+                    if coverage_plan.obstacles is not None
+                    else "No cargados"
+                ),
             }
 
         current_snapshot = {
-            "snapshot_version": 2,
+            "snapshot_version": 3,
             "name": "Estimación actual",
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "input_state": capture_estimation_input_state(st.session_state),
@@ -1500,6 +1785,14 @@ def app_streamlit():
                     "data_base64": base64.b64encode(polygon_bytes).decode("ascii"),
                 }
                 if polygon_name and polygon_bytes is not None
+                else None
+            ),
+            "obstacles": (
+                {
+                    "name": obstacle_name,
+                    "data_base64": base64.b64encode(obstacle_bytes).decode("ascii"),
+                }
+                if obstacle_name and obstacle_bytes is not None
                 else None
             ),
             "parameters": scenario_parameters,
@@ -1572,6 +1865,12 @@ def app_streamlit():
                 else:
                     st.session_state.pop("_active_polygon", None)
                 st.session_state["_prefer_restored_polygon"] = True
+                obstacles = snapshot.get("obstacles")
+                if isinstance(obstacles, dict) and obstacles.get("data_base64"):
+                    st.session_state["_active_obstacles"] = obstacles
+                else:
+                    st.session_state.pop("_active_obstacles", None)
+                st.session_state["_prefer_restored_obstacles"] = True
                 if snapshot.get("input_state"):
                     st.session_state["_loaded_estimation_notice"] = (
                         f"Estimación '{name}' cargada y recalculada con sus parámetros guardados."

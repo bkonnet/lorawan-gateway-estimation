@@ -280,9 +280,29 @@ No es necesario convertir previamente un KMZ. Si contiene varias carpetas o elem
 
 Los presets definen valores iniciales de exponente de pérdida, pérdida adicional y margen de desvanecimiento. Todos son editables. El preset **Terminal de contenedores** es deliberadamente conservador, pero debe calibrarse con mediciones RSSI/SNR del sitio.
 
+### Dispositivo y sensibilidad
+
+El uplink y el downlink se verifican por separado. Para el uplink, el ZRSM es el transmisor y la sensibilidad relevante es la del gateway. Para ACK/downlink, el gateway es el transmisor y la sensibilidad relevante es la del ZRSM.
+
+La interfaz permite configurar:
+
+- potencia conducida y ganancia de antena del dispositivo,
+- pérdida efectiva por montaje en la puerta metálica,
+- sensibilidad del gateway para cada SF7-SF12 a BW125,
+- EIRP de downlink y sensibilidad RX del dispositivo,
+- exigencia opcional de enlace bidireccional.
+
+Los valores genéricos deben reemplazarse por los datasheets del gateway y del dispositivo completos. El margen de diseño se exige además de la sensibilidad; por ejemplo, sensibilidad `-132 dBm` y margen `20 dB` requieren al menos `-112 dBm` en el receptor.
+
+### Filas y bloques de contenedores
+
+Puede cargarse un segundo KMZ, KML o GeoJSON con polígonos que representen filas o bloques de contenedores. Cada polígono atravesado agrega la pérdida configurada, con un límite acumulado para evitar resultados numéricamente extremos. Estos polígonos se muestran en naranja sobre el mapa.
+
+La atenuación por bloque no es universal: debe calibrarse con mediciones en el terminal y mantenerse como escenarios de ocupación baja, media y alta.
+
 ### Redundancia
 
-El campo **Gateways mínimos por punto** exige que cada punto de la cuadrícula esté dentro del radio estimado de 1, 2 o 3 gateways distintos. Para una red crítica se recomienda comenzar con 2.
+El campo **Gateways mínimos por punto** exige que cada punto supere la sensibilidad más el margen requerido con 1, 2 o 3 gateways físicamente distintos. Si se exige enlace bidireccional, ambos sentidos deben cumplir. Para una red crítica se recomienda comenzar con 2.
 
 ### Antenas y orientación
 
@@ -304,12 +324,14 @@ Los valores deben reemplazarse por la ficha técnica o, idealmente, por los patr
 ### Algoritmo
 
 1. Proyecta el GeoJSON a un plano local.
-2. Calcula un radio efectivo mediante link budget y un modelo log-distance.
+2. Calcula uplink y downlink mediante link budget y un modelo log-distance.
 3. Muestrea el polígono en una cuadrícula configurable.
-4. Aplica el patrón horizontal/vertical, altura y downtilt de la antena.
-5. Selecciona ubicaciones y azimuts preliminares mediante un algoritmo greedy multi-cover.
-6. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
-7. Calcula el resultado final como el máximo entre capacidad y cobertura.
+4. Aplica sensibilidad por SF, margen de diseño y pérdida de montaje del dispositivo.
+5. Aplica el patrón horizontal/vertical, altura, downtilt y obstáculos atravesados.
+6. Selecciona ubicaciones y azimuts preliminares mediante un algoritmo greedy multi-cover.
+7. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
+8. Reporta cobertura 2×, margen mínimo y percentil 10 del margen.
+9. Calcula el resultado final como el máximo entre capacidad y cobertura.
 
 ```text
 Gateways finales = MAX(gateways por capacidad, gateways por cobertura)
@@ -539,6 +561,11 @@ Retransmission factor: 2.0
 Eficiencia ALOHA: 0.10
 Máximo bloqueo RX: 0.06
 Factor seguridad: 1.4
+Ganancia antena dispositivo: 0 dBi inicialmente
+Pérdida montaje/puerta: 6 dB inicialmente
+Margen RF: 20 dB inicialmente
+Cobertura bidireccional: habilitada
+Gateways mínimos por punto: 2
 ```
 
 ---
@@ -551,7 +578,7 @@ La herramienta permite descargar los resultados como CSV desde la interfaz.
 
 ## Limitaciones
 
-Este programa es una herramienta de dimensionamiento de capacidad. No reemplaza:
+Este programa es una herramienta de dimensionamiento de capacidad y cobertura RF preliminar. No reemplaza:
 
 - simulación RF con terreno,
 - mediciones de campo,
@@ -560,7 +587,7 @@ Este programa es una herramienta de dimensionamiento de capacidad. No reemplaza:
 - modelamiento detallado de colisiones entre gateways,
 - simulación LoRaWAN completa a nivel paquete.
 
-Se recomienda usarlo junto con herramientas de cobertura como Radio Mobile, mediciones RSSI/SNR y pruebas piloto en terreno.
+Se recomienda calibrarlo con mediciones RSSI/SNR y pruebas piloto. CloudRF o Radio Mobile pueden utilizarse como validación externa cuando se disponga de terreno, edificios o escenas 3D más detalladas.
 
 ---
 

@@ -131,6 +131,18 @@ class ProjectedGeometry:
                 return True
         return False
 
+    @property
+    def polygon_bounds(self) -> list[tuple[float, float, float, float]]:
+        return [
+            (
+                min(point[0] for ring in polygon for point in ring),
+                min(point[1] for ring in polygon for point in ring),
+                max(point[0] for ring in polygon for point in ring),
+                max(point[1] for ring in polygon for point in ring),
+            )
+            for polygon in self.polygons
+        ]
+
 
 @dataclass(frozen=True)
 class RadioConfig:
@@ -142,10 +154,24 @@ class RadioConfig:
     path_loss_exponent: float = 3.6
     additional_loss_db: float = 12.0
     fade_margin_db: float = 20.0
+    device_antenna_gain_dbi: float = 0.0
+    device_installation_loss_db: float = 0.0
+    gateway_tx_eirp_dbm: float = 30.0
+    device_receiver_sensitivity_dbm: float = -129.0
+    validate_downlink: bool = True
+    sf_sensitivities_dbm: tuple[float, ...] = tuple(SF_SENSITIVITY_DBM.values())
+    obstacle_loss_db: float = 0.0
+    maximum_obstacle_loss_db: float = 40.0
 
     @property
     def receiver_sensitivity_dbm(self) -> float:
-        return SF_SENSITIVITY_DBM[self.target_sf]
+        return self.sensitivity_for_sf(self.target_sf)
+
+    def sensitivity_for_sf(self, sf_label: str) -> float:
+        labels = tuple(SF_SENSITIVITY_DBM)
+        if len(self.sf_sensitivities_dbm) != len(labels):
+            raise ValueError("Debe configurar una sensibilidad para cada SF7-SF12.")
+        return float(self.sf_sensitivities_dbm[labels.index(sf_label)])
 
 
 @dataclass(frozen=True)
@@ -188,6 +214,7 @@ class CoveragePlan:
     minimum_site_separation_m: float
     edge_priority: float
     dispersion_weight: float
+    obstacles: ProjectedGeometry | None = None
 
     @property
     def selected_points(self) -> list[tuple[float, float]]:
@@ -198,7 +225,10 @@ class CoveragePlan:
         return [self.candidate_azimuths_deg[index] for index in self.selected_indices]
 
 
-def parse_geojson(value: str | bytes | dict) -> ProjectedGeometry:
+def parse_geojson(
+    value: str | bytes | dict,
+    projection: LocalProjection | None = None,
+) -> ProjectedGeometry:
     """Parse Polygon/MultiPolygon GeoJSON into a locally projected geometry."""
     if isinstance(value, bytes):
         value = value.decode("utf-8")
@@ -210,9 +240,10 @@ def parse_geojson(value: str | bytes | dict) -> ProjectedGeometry:
     lon_lats = [tuple(point) for polygon in geometries for ring in polygon for point in ring]
     if any(len(point) < 2 for point in lon_lats):
         raise ValueError("Cada coordenada GeoJSON debe contener longitud y latitud.")
-    lon0 = sum(point[0] for point in lon_lats) / len(lon_lats)
-    lat0 = sum(point[1] for point in lon_lats) / len(lon_lats)
-    projection = LocalProjection(lon0=lon0, lat0=lat0)
+    if projection is None:
+        lon0 = sum(point[0] for point in lon_lats) / len(lon_lats)
+        lat0 = sum(point[1] for point in lon_lats) / len(lon_lats)
+        projection = LocalProjection(lon0=lon0, lat0=lat0)
 
     projected: list[list[list[tuple[float, float]]]] = []
     for polygon in geometries:
@@ -228,7 +259,10 @@ def parse_geojson(value: str | bytes | dict) -> ProjectedGeometry:
     return geometry
 
 
-def parse_kml(value: str | bytes) -> ProjectedGeometry:
+def parse_kml(
+    value: str | bytes,
+    projection: LocalProjection | None = None,
+) -> ProjectedGeometry:
     """Parse all Polygon elements from a KML document."""
     if isinstance(value, bytes):
         value = value.decode("utf-8-sig")
@@ -256,10 +290,16 @@ def parse_kml(value: str | bytes) -> ProjectedGeometry:
         raise ValueError(
             "El KML/KMZ no contiene polígonos. Verifique que no sea solamente una ruta o marcadores."
         )
-    return parse_geojson({"type": "MultiPolygon", "coordinates": polygons})
+    return parse_geojson(
+        {"type": "MultiPolygon", "coordinates": polygons},
+        projection=projection,
+    )
 
 
-def parse_kmz(value: bytes) -> ProjectedGeometry:
+def parse_kmz(
+    value: bytes,
+    projection: LocalProjection | None = None,
+) -> ProjectedGeometry:
     """Extract KML documents from a KMZ archive and parse their polygons."""
     try:
         with ZipFile(BytesIO(value)) as archive:
@@ -271,20 +311,24 @@ def parse_kmz(value: bytes) -> ProjectedGeometry:
                 (name for name in kml_names if name.lower().endswith("doc.kml")),
                 kml_names[0],
             )
-            return parse_kml(archive.read(selected))
+            return parse_kml(archive.read(selected), projection=projection)
     except BadZipFile as exc:
         raise ValueError("El archivo KMZ no es un ZIP/KMZ válido.") from exc
 
 
-def parse_polygon_file(filename: str, value: bytes) -> ProjectedGeometry:
+def parse_polygon_file(
+    filename: str,
+    value: bytes,
+    projection: LocalProjection | None = None,
+) -> ProjectedGeometry:
     """Route a supported polygon file to its parser."""
     extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
     if extension in {"geojson", "json"}:
-        return parse_geojson(value)
+        return parse_geojson(value, projection=projection)
     if extension == "kml":
-        return parse_kml(value)
+        return parse_kml(value, projection=projection)
     if extension == "kmz":
-        return parse_kmz(value)
+        return parse_kmz(value, projection=projection)
     raise ValueError("Formato no soportado. Use GeoJSON, JSON, KML o KMZ.")
 
 
@@ -372,14 +416,109 @@ def free_space_path_loss_1m_db(frequency_mhz: float) -> float:
     return 32.44 + 20 * math.log10(frequency_mhz) + 20 * math.log10(0.001)
 
 
+def _orientation(
+    first: tuple[float, float],
+    second: tuple[float, float],
+    third: tuple[float, float],
+) -> float:
+    return (second[0] - first[0]) * (third[1] - first[1]) - (
+        second[1] - first[1]
+    ) * (third[0] - first[0])
+
+
+def _segments_intersect(
+    first_start: tuple[float, float],
+    first_end: tuple[float, float],
+    second_start: tuple[float, float],
+    second_end: tuple[float, float],
+) -> bool:
+    o1 = _orientation(first_start, first_end, second_start)
+    o2 = _orientation(first_start, first_end, second_end)
+    o3 = _orientation(second_start, second_end, first_start)
+    o4 = _orientation(second_start, second_end, first_end)
+    tolerance = 1e-7
+    if ((o1 > tolerance and o2 < -tolerance) or (o1 < -tolerance and o2 > tolerance)) and (
+        (o3 > tolerance and o4 < -tolerance) or (o3 < -tolerance and o4 > tolerance)
+    ):
+        return True
+    return (
+        (abs(o1) <= tolerance and _point_on_segment(second_start, first_start, first_end))
+        or (abs(o2) <= tolerance and _point_on_segment(second_end, first_start, first_end))
+        or (abs(o3) <= tolerance and _point_on_segment(first_start, second_start, second_end))
+        or (abs(o4) <= tolerance and _point_on_segment(first_end, second_start, second_end))
+    )
+
+
+def obstacle_crossing_count(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    obstacles: ProjectedGeometry | None,
+) -> int:
+    """Count distinct obstacle polygons intersected by a radio path."""
+    if obstacles is None:
+        return 0
+    segment_bounds = (
+        min(start[0], end[0]),
+        min(start[1], end[1]),
+        max(start[0], end[0]),
+        max(start[1], end[1]),
+    )
+    count = 0
+    for polygon, bounds in zip(obstacles.polygons, obstacles.polygon_bounds):
+        if (
+            segment_bounds[2] < bounds[0]
+            or segment_bounds[0] > bounds[2]
+            or segment_bounds[3] < bounds[1]
+            or segment_bounds[1] > bounds[3]
+        ):
+            continue
+        outer = polygon[0]
+        intersects = _point_in_ring(start, outer) or _point_in_ring(end, outer)
+        if not intersects:
+            intersects = any(
+                _segments_intersect(start, end, outer[index - 1], outer[index])
+                for index in range(len(outer))
+            )
+        if intersects:
+            count += 1
+    return count
+
+
+def obstacle_attenuation_db(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    config: RadioConfig,
+    obstacles: ProjectedGeometry | None,
+) -> float:
+    return min(
+        obstacle_crossing_count(start, end, obstacles) * config.obstacle_loss_db,
+        config.maximum_obstacle_loss_db,
+    )
+
+
 def coverage_radius_m(config: RadioConfig) -> float:
-    available_path_loss = (
+    uplink_available_path_loss = (
         config.tx_eirp_dbm
         + config.gateway_gain_dbi
         - config.gateway_cable_loss_db
         - config.receiver_sensitivity_dbm
         - config.fade_margin_db
         - config.additional_loss_db
+        - config.device_installation_loss_db
+        + config.device_antenna_gain_dbi
+    )
+    downlink_available_path_loss = (
+        config.gateway_tx_eirp_dbm
+        + config.device_antenna_gain_dbi
+        - config.device_installation_loss_db
+        - config.device_receiver_sensitivity_dbm
+        - config.fade_margin_db
+        - config.additional_loss_db
+    )
+    available_path_loss = (
+        min(uplink_available_path_loss, downlink_available_path_loss)
+        if config.validate_downlink
+        else uplink_available_path_loss
     )
     path_loss_1m = free_space_path_loss_1m_db(config.frequency_mhz)
     exponent = max(config.path_loss_exponent, 1.1)
@@ -388,7 +527,10 @@ def coverage_radius_m(config: RadioConfig) -> float:
 
 
 def received_power_dbm(
-    distance_m: float, config: RadioConfig, antenna_attenuation_db: float = 0.0
+    distance_m: float,
+    config: RadioConfig,
+    antenna_attenuation_db: float = 0.0,
+    obstacle_attenuation_db: float = 0.0,
 ) -> float:
     distance_m = max(distance_m, 1.0)
     path_loss = (
@@ -398,10 +540,13 @@ def received_power_dbm(
     )
     return (
         config.tx_eirp_dbm
+        + config.device_antenna_gain_dbi
         + config.gateway_gain_dbi
         - config.gateway_cable_loss_db
+        - config.device_installation_loss_db
         - path_loss
         - antenna_attenuation_db
+        - obstacle_attenuation_db
     )
 
 
@@ -458,9 +603,66 @@ def link_received_power_dbm(
     azimuth_deg: float,
     radio: RadioConfig,
     antenna: AntennaConfig,
+    obstacles: ProjectedGeometry | None = None,
 ) -> float:
     attenuation = antenna_attenuation_db(gateway, device, azimuth_deg, antenna)
-    return received_power_dbm(math.dist(gateway, device), radio, attenuation)
+    obstacle_loss = obstacle_attenuation_db(gateway, device, radio, obstacles)
+    return received_power_dbm(
+        math.dist(gateway, device), radio, attenuation, obstacle_loss
+    )
+
+
+def downlink_received_power_dbm(
+    gateway: tuple[float, float],
+    device: tuple[float, float],
+    azimuth_deg: float,
+    radio: RadioConfig,
+    antenna: AntennaConfig,
+    obstacles: ProjectedGeometry | None = None,
+) -> float:
+    distance_m = max(math.dist(gateway, device), 1.0)
+    path_loss = (
+        free_space_path_loss_1m_db(radio.frequency_mhz)
+        + 10 * radio.path_loss_exponent * math.log10(distance_m)
+        + radio.additional_loss_db
+    )
+    return (
+        radio.gateway_tx_eirp_dbm
+        + radio.device_antenna_gain_dbi
+        - radio.device_installation_loss_db
+        - path_loss
+        - antenna_attenuation_db(gateway, device, azimuth_deg, antenna)
+        - obstacle_attenuation_db(gateway, device, radio, obstacles)
+    )
+
+
+def link_margins_db(
+    gateway: tuple[float, float],
+    device: tuple[float, float],
+    azimuth_deg: float,
+    radio: RadioConfig,
+    antenna: AntennaConfig,
+    obstacles: ProjectedGeometry | None = None,
+) -> tuple[float, float, float]:
+    """Return uplink, downlink and limiting margins above receiver sensitivity."""
+    uplink_margin = (
+        link_received_power_dbm(
+            gateway, device, azimuth_deg, radio, antenna, obstacles
+        )
+        - radio.receiver_sensitivity_dbm
+    )
+    downlink_margin = (
+        downlink_received_power_dbm(
+            gateway, device, azimuth_deg, radio, antenna, obstacles
+        )
+        - radio.device_receiver_sensitivity_dbm
+    )
+    limiting_margin = (
+        min(uplink_margin, downlink_margin)
+        if radio.validate_downlink
+        else uplink_margin
+    )
+    return uplink_margin, downlink_margin, limiting_margin
 
 
 def _candidate_azimuths(antenna: AntennaConfig) -> list[float]:
@@ -515,9 +717,9 @@ def _coverage_sets(
     radius_m: float,
     radio: RadioConfig,
     antenna: AntennaConfig,
+    obstacles: ProjectedGeometry | None = None,
 ) -> tuple[list[list[int]], list[float]]:
     radius_squared = radius_m * radius_m
-    threshold_dbm = radio.receiver_sensitivity_dbm + radio.fade_margin_db
     coverage_sets: list[list[int]] = []
     quality_scores: list[float] = []
     for candidate_index, candidate in enumerate(candidates):
@@ -530,20 +732,21 @@ def _coverage_sets(
                 > radius_squared
             ):
                 continue
-            power_dbm = link_received_power_dbm(
+            _, _, limiting_margin_db = link_margins_db(
                 candidate,
                 point,
                 candidate_azimuths_deg[candidate_index],
                 radio,
                 antenna,
+                obstacles,
             )
-            margin_db = power_dbm - threshold_dbm
-            if margin_db >= 0:
+            design_surplus_db = limiting_margin_db - radio.fade_margin_db
+            if design_surplus_db >= 0:
                 covered_points.append(point_index)
                 # Prefer an orientation whose main lobe provides useful margin
                 # inside the polygon, even if several azimuths cover the same count.
                 quality += evaluation_weights[point_index] * (
-                    1.0 + min(margin_db, 40.0)
+                    1.0 + min(design_surplus_db, 40.0)
                 )
         coverage_sets.append(covered_points)
         quality_scores.append(quality)
@@ -616,9 +819,13 @@ def _greedy_multicover(
     return selected, remaining
 
 
-def _sf_for_power(received_dbm: float, fade_margin_db: float) -> str:
+def _sf_for_power(
+    received_dbm: float,
+    fade_margin_db: float,
+    config: RadioConfig,
+) -> str:
     for sf_label in ("SF7", "SF8", "SF9", "SF10", "SF11", "SF12"):
-        if received_dbm >= SF_SENSITIVITY_DBM[sf_label] + fade_margin_db:
+        if received_dbm >= config.sensitivity_for_sf(sf_label) + fade_margin_db:
             return sf_label
     return "SF12"
 
@@ -630,6 +837,7 @@ def _derive_sf_distribution(
     config: RadioConfig,
     antenna: AntennaConfig,
     redundancy: int,
+    obstacles: ProjectedGeometry | None = None,
 ) -> dict[str, float]:
     counts = {sf: 0 for sf in SF_SENSITIVITY_DBM}
     if not selected_points:
@@ -644,15 +852,67 @@ def _derive_sf_distribution(
                         selected_azimuths_deg[index],
                         config,
                         antenna,
+                        obstacles,
                     )
                     for index, gateway in enumerate(selected_points)
                 ),
                 reverse=True,
             )
             rank = min(max(redundancy - 1, 0), len(powers) - 1)
-            counts[_sf_for_power(powers[rank], config.fade_margin_db)] += 1
+            counts[_sf_for_power(powers[rank], config.fade_margin_db, config)] += 1
     total = max(sum(counts.values()), 1)
     return {sf: count / total for sf, count in counts.items()}
+
+
+def deployment_link_analysis(
+    plan: CoveragePlan,
+    gateway_points: list[tuple[float, float]],
+    gateway_azimuths_deg: list[float],
+) -> list[dict[str, float | int]]:
+    """Return point-level redundant link margins for a deployed network."""
+    if len(gateway_points) != len(gateway_azimuths_deg):
+        raise ValueError("Cada gateway debe tener exactamente un azimut.")
+    radius_squared = plan.radius_m * plan.radius_m
+    analysis: list[dict[str, float | int]] = []
+    for point in plan.evaluation_points:
+        links: list[tuple[float, float, float]] = []
+        for gateway, azimuth in zip(gateway_points, gateway_azimuths_deg):
+            if (
+                (gateway[0] - point[0]) ** 2 + (gateway[1] - point[1]) ** 2
+                > radius_squared
+            ):
+                continue
+            links.append(
+                link_margins_db(
+                    gateway,
+                    point,
+                    azimuth,
+                    plan.radio_config,
+                    plan.antenna_config,
+                    plan.obstacles,
+                )
+            )
+        links.sort(key=lambda item: item[2], reverse=True)
+        count = sum(
+            limiting >= plan.radio_config.fade_margin_db
+            for _, _, limiting in links
+        )
+        rank = plan.redundancy - 1
+        if len(links) > rank:
+            uplink_margin, downlink_margin, limiting_margin = links[rank]
+            design_surplus = limiting_margin - plan.radio_config.fade_margin_db
+        else:
+            uplink_margin = downlink_margin = limiting_margin = design_surplus = -math.inf
+        analysis.append(
+            {
+                "count": count,
+                "uplink_margin_db": uplink_margin,
+                "downlink_margin_db": downlink_margin,
+                "limiting_margin_db": limiting_margin,
+                "design_surplus_db": design_surplus,
+            }
+        )
+    return analysis
 
 
 def deployment_coverage_counts(
@@ -661,35 +921,12 @@ def deployment_coverage_counts(
     gateway_azimuths_deg: list[float],
 ) -> list[int]:
     """Count distinct deployed gateways covering every evaluation point."""
-    if len(gateway_points) != len(gateway_azimuths_deg):
-        raise ValueError("Cada gateway debe tener exactamente un azimut.")
-    threshold_dbm = (
-        plan.radio_config.receiver_sensitivity_dbm
-        + plan.radio_config.fade_margin_db
-    )
-    radius_squared = plan.radius_m * plan.radius_m
-    counts: list[int] = []
-    for point in plan.evaluation_points:
-        count = 0
-        for gateway, azimuth in zip(gateway_points, gateway_azimuths_deg):
-            if (
-                (gateway[0] - point[0]) ** 2 + (gateway[1] - point[1]) ** 2
-                > radius_squared
-            ):
-                continue
-            if (
-                link_received_power_dbm(
-                    gateway,
-                    point,
-                    azimuth,
-                    plan.radio_config,
-                    plan.antenna_config,
-                )
-                >= threshold_dbm
-            ):
-                count += 1
-        counts.append(count)
-    return counts
+    return [
+        int(item["count"])
+        for item in deployment_link_analysis(
+            plan, gateway_points, gateway_azimuths_deg
+        )
+    ]
 
 
 def _spread_sample_points(
@@ -792,6 +1029,7 @@ def plan_coverage(
     minimum_site_separation_m: float = 100.0,
     edge_priority: float = 3.0,
     dispersion_weight: float = 0.30,
+    obstacles: ProjectedGeometry | None = None,
     max_evaluation_points: int = 3_000,
     max_candidate_points: int = 1_500,
 ) -> CoveragePlan:
@@ -843,6 +1081,7 @@ def plan_coverage(
         radius_m,
         config,
         antenna,
+        obstacles,
     )
     selected_indices, remaining = _greedy_multicover(
         coverage_sets,
@@ -867,6 +1106,7 @@ def plan_coverage(
         config,
         antenna,
         redundancy,
+        obstacles,
     )
     warnings: list[str] = []
     if effective_resolution > resolution_m * 1.05:
@@ -905,6 +1145,7 @@ def plan_coverage(
         minimum_site_separation_m=minimum_site_separation_m,
         edge_priority=edge_priority,
         dispersion_weight=dispersion_weight,
+        obstacles=obstacles,
     )
 
 
