@@ -82,6 +82,7 @@ class GatewayEstimationTests(unittest.TestCase):
         self.assertEqual(restored["input_nodes"], 4000)
         self.assertEqual(restored["input_confirmed_ratio"], 0.25)
         self.assertTrue(restored["input_coverage_enabled"])
+        self.assertTrue(restored["input_require_hpbw_redundancy"])
 
     def test_antenna_preset_updates_all_owned_rf_controls(self):
         omni = antenna_preset_input_state("Omnidireccional")

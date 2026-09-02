@@ -163,11 +163,13 @@ def restorable_input_state(snapshot: dict) -> dict:
     """Return current-format inputs, with a small migration for legacy snapshots."""
     stored = snapshot.get("input_state")
     if isinstance(stored, dict) and stored:
-        return {
+        restored = {
             key: value
             for key, value in stored.items()
             if key in ESTIMATION_WIDGET_KEYS
         }
+        restored.setdefault("input_require_hpbw_redundancy", True)
+        return restored
 
     parameters = snapshot.get("parameters") or {}
     coverage = snapshot.get("coverage") or {}
@@ -201,6 +203,7 @@ def restorable_input_state(snapshot: dict) -> dict:
         migrated["input_rx2_ratio"] = percent(parameters["ACK en RX2"])
     if coverage:
         migrated["input_coverage_enabled"] = True
+        migrated["input_require_hpbw_redundancy"] = True
     return migrated
 
 
