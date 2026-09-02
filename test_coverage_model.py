@@ -20,6 +20,7 @@ from coverage_model import (
     parse_kml,
     parse_kmz,
     parse_polygon_file,
+    path_loss_exponent_scenarios,
     plan_coverage,
     ray_length_within_geometry,
     link_received_power_dbm,
@@ -82,6 +83,19 @@ class CoverageModelTests(unittest.TestCase):
         radius = coverage_radius_m(config)
         self.assertGreater(radius, 100)
         self.assertLess(radius, 2_000)
+
+    def test_path_loss_scenarios_are_centered_and_ordered(self):
+        scenarios = path_loss_exponent_scenarios(3.6, 0.3)
+        self.assertEqual([name for name, _ in scenarios], ["Favorable", "Base", "Crítico"])
+        self.assertEqual([round(value, 1) for _, value in scenarios], [3.3, 3.6, 3.9])
+        radii = [
+            coverage_radius_m(
+                RadioConfig(path_loss_exponent=value, validate_downlink=False)
+            )
+            for _, value in scenarios
+        ]
+        self.assertGreater(radii[0], radii[1])
+        self.assertGreater(radii[1], radii[2])
 
     def test_redundancy_two_selects_multiple_gateways(self):
         geometry = parse_geojson(SQUARE)

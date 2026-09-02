@@ -280,6 +280,8 @@ No es necesario convertir previamente un KMZ. Si contiene varias carpetas o elem
 
 Los presets definen valores iniciales de exponente de pérdida, pérdida adicional y margen de desvanecimiento. Todos son editables. El preset **Terminal de contenedores** es deliberadamente conservador, pero debe calibrarse con mediciones RSSI/SNR del sitio.
 
+La opción **Calcular rango por incertidumbre del exponente** ejecuta tres diseños manteniendo iguales los demás parámetros: favorable (`n - variación`), base (`n`) y crítico (`n + variación`). La variación inicial es `±0,3`. La tabla resultante informa radio de boresight, gateways por capacidad, gateways por cobertura, total final y porcentaje de redundancia robusta. Si un escenario no alcanza el 100%, su resultado se interpreta como un mínimo pendiente de resolver y no como un diseño cerrado.
+
 ### Dispositivo y sensibilidad
 
 El uplink y el downlink se verifican por separado. Para el uplink, el ZRSM es el transmisor y la sensibilidad relevante es la del gateway. Para ACK/downlink, el gateway es el transmisor y la sensibilidad relevante es la del ZRSM.
@@ -570,6 +572,7 @@ Margen RF: 20 dB inicialmente
 Cobertura bidireccional: habilitada
 Gateways mínimos por punto: 2
 Redundancia dentro del HPBW horizontal: habilitada
+Rango del exponente: habilitado, variación ±0,3
 ```
 
 ---

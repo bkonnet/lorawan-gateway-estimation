@@ -527,6 +527,20 @@ def coverage_radius_m(config: RadioConfig) -> float:
     return min(max(radius, 10.0), 50_000.0)
 
 
+def path_loss_exponent_scenarios(
+    base_exponent: float,
+    variation: float = 0.3,
+) -> list[tuple[str, float]]:
+    """Build favorable/base/critical exponents around the selected estimate."""
+    base = min(max(float(base_exponent), 1.1), 6.0)
+    spread = min(max(float(variation), 0.0), 2.0)
+    return [
+        ("Favorable", max(base - spread, 1.1)),
+        ("Base", base),
+        ("Crítico", min(base + spread, 6.0)),
+    ]
+
+
 def received_power_dbm(
     distance_m: float,
     config: RadioConfig,

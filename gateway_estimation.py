@@ -1,6 +1,7 @@
 import base64
 import json
 import math
+from dataclasses import replace
 from datetime import datetime
 
 import pandas as pd
@@ -14,6 +15,7 @@ from coverage_model import (
     deployment_link_analysis,
     gateway_sites_geojson,
     parse_polygon_file,
+    path_loss_exponent_scenarios,
     plan_coverage,
     points_to_lon_lat,
     ray_length_within_geometry,
@@ -133,6 +135,8 @@ ESTIMATION_WIDGET_KEYS = (
     "input_resolution",
     "input_minimum_site_separation",
     "input_path_loss_exponent",
+    "input_analyze_path_loss_range",
+    "input_path_loss_variation",
     "input_additional_loss",
     "input_fade_margin",
     "input_obstacle_loss",
@@ -169,6 +173,8 @@ def restorable_input_state(snapshot: dict) -> dict:
             if key in ESTIMATION_WIDGET_KEYS
         }
         restored.setdefault("input_require_hpbw_redundancy", True)
+        restored.setdefault("input_analyze_path_loss_range", True)
+        restored.setdefault("input_path_loss_variation", 0.3)
         return restored
 
     parameters = snapshot.get("parameters") or {}
@@ -204,6 +210,8 @@ def restorable_input_state(snapshot: dict) -> dict:
     if coverage:
         migrated["input_coverage_enabled"] = True
         migrated["input_require_hpbw_redundancy"] = True
+        migrated["input_analyze_path_loss_range"] = True
+        migrated["input_path_loss_variation"] = 0.3
     return migrated
 
 
@@ -704,6 +712,8 @@ def app_streamlit():
         if not math.isclose(suma_sf, 1.0, abs_tol=1e-6):
             st.warning("La suma de SF no es 1.0. Se normalizará automáticamente para el cálculo.")
 
+    traffic_distribution = dict(distribucion)
+
     st.divider()
     st.subheader("Cobertura geográfica y redundancia")
     coverage_enabled = st.toggle(
@@ -719,6 +729,8 @@ def app_streamlit():
     polygon_bytes = None
     obstacle_name = None
     obstacle_bytes = None
+    coverage_sensitivity_plans = []
+    path_loss_sensitivity_rows = []
 
     if coverage_enabled:
         st.info(
@@ -1049,6 +1061,29 @@ def app_streamlit():
                 key="input_fade_margin",
             )
 
+        sensitivity_col1, sensitivity_col2 = st.columns(2)
+        with sensitivity_col1:
+            analyze_path_loss_range = st.checkbox(
+                "Calcular rango por incertidumbre del exponente",
+                value=True,
+                key="input_analyze_path_loss_range",
+                help=(
+                    "Calcula escenarios favorable, base y crítico sin modificar los demás "
+                    "parámetros del link budget."
+                ),
+            )
+        with sensitivity_col2:
+            path_loss_variation = st.number_input(
+                "Variación del exponente (±)",
+                0.0,
+                1.0,
+                0.3,
+                0.1,
+                key="input_path_loss_variation",
+                disabled=not analyze_path_loss_range,
+                help="Con base 3,6 y variación 0,3 se evalúan 3,3 / 3,6 / 3,9.",
+            )
+
         obstacle_col1, obstacle_col2 = st.columns(2)
         with obstacle_col1:
             obstacle_loss = st.number_input(
@@ -1170,6 +1205,37 @@ def app_streamlit():
                     dispersion_weight=float(dispersion_weight),
                     obstacles=coverage_obstacles,
                 )
+                if analyze_path_loss_range:
+                    for scenario_name, scenario_exponent in path_loss_exponent_scenarios(
+                        path_loss_exponent,
+                        path_loss_variation,
+                    ):
+                        scenario_plan = (
+                            coverage_plan
+                            if scenario_name == "Base"
+                            else plan_coverage(
+                                coverage_geometry,
+                                replace(
+                                    radio_config,
+                                    path_loss_exponent=float(scenario_exponent),
+                                ),
+                                antenna=antenna_config,
+                                redundancy=int(redundancy),
+                                require_hpbw_redundancy=bool(
+                                    require_hpbw_redundancy
+                                ),
+                                resolution_m=float(resolution_m),
+                                minimum_site_separation_m=float(
+                                    minimum_site_separation
+                                ),
+                                edge_priority=float(edge_priority),
+                                dispersion_weight=float(dispersion_weight),
+                                obstacles=coverage_obstacles,
+                            )
+                        )
+                        coverage_sensitivity_plans.append(
+                            (scenario_name, float(scenario_exponent), scenario_plan)
+                        )
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Superficie", f"{coverage_plan.area_m2 / 1_000_000:.2f} km²")
                 m2.metric("Radio máximo en boresight", f"{coverage_plan.radius_m:.0f} m")
@@ -1306,24 +1372,27 @@ def app_streamlit():
         st.dataframe(tabla_dr, use_container_width=True, hide_index=True)
 
     try:
-        df, resumen, advertencias = estimar_gateways(
-            nodos_totales=int(nodos),
-            mensajes_por_nodo_por_hora=float(mensajes_hora),
-            eficiencia_aloha_uplink=float(eficiencia_aloha),
-            canales_uplink_por_gateway=int(canales_ul),
-            factor_seguridad=float(factor_seguridad),
-            distribucion_sf=distribucion,
-            payload_uplink_bytes=int(payload_ul),
-            confirmed_ratio=float(confirmed_ratio),
-            ack_payload_bytes=int(ack_payload),
-            rx2_fallback_ratio=float(rx2_fallback),
-            eficiencia_downlink_ack=float(eficiencia_ack),
-            max_blocking_rx=float(max_blocking_rx),
-            retransmission_factor=float(retransmission_factor),
-            fopts_uplink_bytes=int(fopts_uplink),
-            fopts_downlink_bytes=int(fopts_downlink),
-            uplink_dwell_time_enabled=bool(uplink_dwell_time_enabled),
-        )
+        def run_capacity_estimate(distribution):
+            return estimar_gateways(
+                nodos_totales=int(nodos),
+                mensajes_por_nodo_por_hora=float(mensajes_hora),
+                eficiencia_aloha_uplink=float(eficiencia_aloha),
+                canales_uplink_por_gateway=int(canales_ul),
+                factor_seguridad=float(factor_seguridad),
+                distribucion_sf=distribution,
+                payload_uplink_bytes=int(payload_ul),
+                confirmed_ratio=float(confirmed_ratio),
+                ack_payload_bytes=int(ack_payload),
+                rx2_fallback_ratio=float(rx2_fallback),
+                eficiencia_downlink_ack=float(eficiencia_ack),
+                max_blocking_rx=float(max_blocking_rx),
+                retransmission_factor=float(retransmission_factor),
+                fopts_uplink_bytes=int(fopts_uplink),
+                fopts_downlink_bytes=int(fopts_downlink),
+                uplink_dwell_time_enabled=bool(uplink_dwell_time_enabled),
+            )
+
+        df, resumen, advertencias = run_capacity_estimate(distribucion)
 
         if advertencias:
             st.subheader("⚠️ Advertencias")
@@ -1341,6 +1410,73 @@ def app_streamlit():
         c2.metric("Gateways por capacidad", gateways_capacidad)
         c3.metric("Gateways por cobertura", gateways_cobertura if coverage_plan else "sin polígono")
         c4.metric("Condición dominante", "cobertura" if gateways_cobertura > gateways_capacidad else resumen["cuello_botella"])
+
+        if coverage_sensitivity_plans:
+            for scenario_name, scenario_exponent, scenario_plan in coverage_sensitivity_plans:
+                scenario_distribution = (
+                    scenario_plan.sf_distribution
+                    if use_coverage_distribution
+                    else traffic_distribution
+                )
+                scenario_summary = (
+                    resumen
+                    if scenario_name == "Base"
+                    else run_capacity_estimate(scenario_distribution)[1]
+                )
+                scenario_capacity = int(scenario_summary["gateways_recomendados"])
+                scenario_coverage = len(scenario_plan.selected_points)
+                scenario_final = max(scenario_capacity, scenario_coverage, 1)
+                path_loss_sensitivity_rows.append(
+                    {
+                        "Escenario": scenario_name,
+                        "Exponente n": round(scenario_exponent, 2),
+                        "Radio boresight (m)": round(scenario_plan.radius_m),
+                        "Gateways capacidad": scenario_capacity,
+                        "Gateways cobertura": scenario_coverage,
+                        "Gateways finales": scenario_final,
+                        "Cobertura robusta": f"{scenario_plan.coverage_fraction:.1%}",
+                    }
+                )
+
+            base_final = next(
+                row["Gateways finales"]
+                for row in path_loss_sensitivity_rows
+                if row["Escenario"] == "Base"
+            )
+            for row in path_loss_sensitivity_rows:
+                row["Variación vs base"] = row["Gateways finales"] - base_final
+
+            st.subheader("Rango por incertidumbre del exponente de pérdida")
+            st.dataframe(
+                pd.DataFrame(path_loss_sensitivity_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+            scenario_minimum = min(
+                row["Gateways finales"] for row in path_loss_sensitivity_rows
+            )
+            scenario_maximum = max(
+                row["Gateways finales"] for row in path_loss_sensitivity_rows
+            )
+            st.info(
+                f"Rango estimado: {scenario_minimum}–{scenario_maximum} gateways; "
+                f"valor base: {base_final}. El escenario crítico debe usarse como referencia "
+                "hasta calibrar el exponente con mediciones RSSI/SNR del terminal."
+            )
+            incomplete_scenarios = [
+                row["Escenario"]
+                for row, (_, _, scenario_plan) in zip(
+                    path_loss_sensitivity_rows,
+                    coverage_sensitivity_plans,
+                )
+                if scenario_plan.coverage_fraction < 0.999
+            ]
+            if incomplete_scenarios:
+                st.warning(
+                    "El optimizador no logró cerrar el 100% de la redundancia en: "
+                    + ", ".join(incomplete_scenarios)
+                    + ". El máximo del rango debe interpretarse como un mínimo pendiente de resolver."
+                )
 
         c5, c6, c7, c8 = st.columns(4)
         c5.metric("Gateways por uplink (cuello uplink)", resumen["gateways_por_uplink"])
@@ -1835,6 +1971,19 @@ def app_streamlit():
                 "Downtilt": f"{downtilt:.1f}°",
                 "Altura gateway / dispositivo": f"{gateway_height:.1f} m / {device_height:.1f} m",
                 "Pérdida adicional ambiente": f"{additional_loss:.1f} dB",
+                "Variación evaluada del exponente": (
+                    f"±{path_loss_variation:.1f}"
+                    if analyze_path_loss_range
+                    else "No evaluada"
+                ),
+                "Rango de gateways por exponente": (
+                    "; ".join(
+                        f"{row['Escenario']} n={row['Exponente n']}: {row['Gateways finales']}"
+                        for row in path_loss_sensitivity_rows
+                    )
+                    if path_loss_sensitivity_rows
+                    else "No calculado"
+                ),
                 "Margen de desvanecimiento": f"{fade_margin:.1f} dB",
                 "Margen mínimo vs diseño": (
                     f"{minimum_surplus:.1f} dB"
