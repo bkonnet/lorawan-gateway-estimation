@@ -280,7 +280,7 @@ No es necesario convertir previamente un KMZ. Si contiene varias carpetas o elem
 
 Los presets definen valores iniciales de exponente de pérdida, pérdida adicional y margen de desvanecimiento. Todos son editables. El preset **Terminal de contenedores** es deliberadamente conservador, pero debe calibrarse con mediciones RSSI/SNR del sitio.
 
-La opción **Calcular rango por incertidumbre del exponente** ejecuta tres diseños manteniendo iguales los demás parámetros: favorable (`n - variación`), base (`n`) y crítico (`n + variación`). La variación inicial es `±0,3`. La tabla resultante informa radio de boresight, gateways por capacidad, gateways por cobertura, total final y porcentaje de redundancia robusta. Si un escenario no alcanza el 100%, su resultado se interpreta como un mínimo pendiente de resolver y no como un diseño cerrado.
+La opción **Calcular rango por incertidumbre del exponente** ejecuta tres diseños manteniendo iguales los demás parámetros: favorable (`n - variación`), base (`n`) y crítico (`n + variación`). La variación inicial es `±0,3`. La tabla resultante informa radio de boresight, gateways por capacidad, gateways por cobertura, total final y porcentaje de redundancia robusta. El rango solo incluye escenarios que alcanzan toda la redundancia exigida. Un escenario incompleto informa cuántos gateways fueron ubicados y qué cobertura consiguió, pero queda explícitamente fuera del límite superior hasta resolver sus restricciones espaciales.
 
 ### Dispositivo y sensibilidad
 

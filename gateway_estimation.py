@@ -1435,6 +1435,11 @@ def app_streamlit():
                         "Gateways cobertura": scenario_coverage,
                         "Gateways finales": scenario_final,
                         "Cobertura robusta": f"{scenario_plan.coverage_fraction:.1%}",
+                        "Estado": (
+                            "Resuelto"
+                            if scenario_plan.coverage_fraction >= 0.999
+                            else "Incompleto"
+                        ),
                     }
                 )
 
@@ -1447,35 +1452,57 @@ def app_streamlit():
                 row["Variación vs base"] = row["Gateways finales"] - base_final
 
             st.subheader("Rango por incertidumbre del exponente de pérdida")
+            display_sensitivity_rows = []
+            for row in path_loss_sensitivity_rows:
+                display_row = dict(row)
+                if row["Estado"] != "Resuelto":
+                    display_row["Gateways finales"] = (
+                        f"{row['Gateways finales']} usados (incompleto)"
+                    )
+                    display_row["Variación vs base"] = "—"
+                display_sensitivity_rows.append(display_row)
             st.dataframe(
-                pd.DataFrame(path_loss_sensitivity_rows),
+                pd.DataFrame(display_sensitivity_rows),
                 use_container_width=True,
                 hide_index=True,
             )
-            scenario_minimum = min(
-                row["Gateways finales"] for row in path_loss_sensitivity_rows
-            )
-            scenario_maximum = max(
-                row["Gateways finales"] for row in path_loss_sensitivity_rows
-            )
-            st.info(
-                f"Rango estimado: {scenario_minimum}–{scenario_maximum} gateways; "
-                f"valor base: {base_final}. El escenario crítico debe usarse como referencia "
-                "hasta calibrar el exponente con mediciones RSSI/SNR del terminal."
-            )
-            incomplete_scenarios = [
-                row["Escenario"]
-                for row, (_, _, scenario_plan) in zip(
-                    path_loss_sensitivity_rows,
-                    coverage_sensitivity_plans,
-                )
-                if scenario_plan.coverage_fraction < 0.999
+            resolved_scenarios = [
+                row for row in path_loss_sensitivity_rows if row["Estado"] == "Resuelto"
             ]
+            incomplete_scenarios = [
+                row for row in path_loss_sensitivity_rows if row["Estado"] != "Resuelto"
+            ]
+            base_row = next(
+                row for row in path_loss_sensitivity_rows if row["Escenario"] == "Base"
+            )
+            if resolved_scenarios:
+                resolved_minimum = min(
+                    row["Gateways finales"] for row in resolved_scenarios
+                )
+                resolved_maximum = max(
+                    row["Gateways finales"] for row in resolved_scenarios
+                )
+                base_text = (
+                    str(base_row["Gateways finales"])
+                    if base_row["Estado"] == "Resuelto"
+                    else "no resuelto"
+                )
+                st.info(
+                    f"Rango de diseños cerrados: {resolved_minimum}–{resolved_maximum} gateways; "
+                    f"valor base: {base_text}. Solo se incluyen escenarios que alcanzan toda "
+                    "la redundancia exigida."
+                )
             if incomplete_scenarios:
+                incomplete_description = "; ".join(
+                    f"{row['Escenario']}: {row['Gateways finales']} gateways usados, "
+                    f"{row['Cobertura robusta']} de cobertura robusta"
+                    for row in incomplete_scenarios
+                )
                 st.warning(
-                    "El optimizador no logró cerrar el 100% de la redundancia en: "
-                    + ", ".join(incomplete_scenarios)
-                    + ". El máximo del rango debe interpretarse como un mínimo pendiente de resolver."
+                    "Escenario sin solución completa — "
+                    + incomplete_description
+                    + ". No se incluye como límite superior del rango. Revise separación mínima, "
+                    "resolución, HPBW o ubicaciones permitidas antes de adoptar una cantidad."
                 )
 
         c5, c6, c7, c8 = st.columns(4)
@@ -1978,7 +2005,8 @@ def app_streamlit():
                 ),
                 "Rango de gateways por exponente": (
                     "; ".join(
-                        f"{row['Escenario']} n={row['Exponente n']}: {row['Gateways finales']}"
+                        f"{row['Escenario']} n={row['Exponente n']}: "
+                        f"{row['Gateways finales']} ({row['Estado'].lower()})"
                         for row in path_loss_sensitivity_rows
                     )
                     if path_loss_sensitivity_rows
