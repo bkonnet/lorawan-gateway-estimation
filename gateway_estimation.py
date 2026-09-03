@@ -1023,6 +1023,10 @@ def app_streamlit():
             resolution_m = st.number_input(
                 "Resolución de evaluación (m)", 25.0, 1000.0, 100.0, 25.0,
                 key="input_resolution",
+                help=(
+                    "Tamaño máximo de la celda de diseño. El modelo verifica internamente "
+                    "con una malla dos veces más densa para detectar huecos entre puntos."
+                ),
             )
             minimum_site_separation = st.number_input(
                 "Separación mínima entre sitios (m)",
@@ -1247,6 +1251,7 @@ def app_streamlit():
                     f" Referencia isotrópica 0 dBi: {coverage_plan.isotropic_radius_m:.0f} m."
                     f" Verificación: {len(coverage_plan.evaluation_points)} puntos, incluyendo "
                     f"{coverage_plan.boundary_point_count} puntos específicos de perímetro. "
+                    f"Paso interno efectivo: {coverage_plan.effective_resolution_m:.0f} m. "
                     f"Enlace exigido: {'uplink + downlink' if validate_downlink else 'solo uplink'}. "
                     f"Redundancia: {'dentro del HPBW horizontal' if require_hpbw_redundancy else 'por link budget, incluidos lóbulos laterales'}."
                 )
@@ -1542,6 +1547,13 @@ def app_streamlit():
                 count >= coverage_plan.redundancy
                 for count in final_coverage_counts
             )
+            partially_covered_evaluation_points = sum(
+                0 < count < coverage_plan.redundancy
+                for count in final_coverage_counts
+            )
+            uncovered_evaluation_points = sum(
+                count == 0 for count in final_coverage_counts
+            )
             radio_covered_evaluation_points = sum(
                 count >= coverage_plan.redundancy
                 for count in final_radio_counts
@@ -1597,6 +1609,11 @@ def app_streamlit():
             verification_col6.metric(
                 "Margen P10 vs diseño",
                 f"{percentile_10_surplus:.1f} dB" if math.isfinite(percentile_10_surplus) else "sin enlace",
+            )
+            st.caption(
+                f"Desglose de la malla interna: {covered_evaluation_points} puntos cumplen "
+                f"{coverage_plan.redundancy}×; {partially_covered_evaluation_points} tienen "
+                f"cobertura parcial y {uncovered_evaluation_points} no tienen cobertura robusta."
             )
             finite_rank_links = [
                 item
@@ -1730,7 +1747,23 @@ def app_streamlit():
                         )
                         if count >= coverage_plan.redundancy
                     ]
-                    lateral_points = [
+                    partial_points = [
+                        point
+                        for point, robust_count in zip(
+                            coverage_plan.evaluation_points,
+                            final_coverage_counts,
+                        )
+                        if 0 < robust_count < coverage_plan.redundancy
+                    ]
+                    uncovered_points = [
+                        point
+                        for point, robust_count in zip(
+                            coverage_plan.evaluation_points,
+                            final_coverage_counts,
+                        )
+                        if robust_count == 0
+                    ]
+                    lateral_fallback_points = [
                         point
                         for point, robust_count, radio_count in zip(
                             coverage_plan.evaluation_points,
@@ -1739,14 +1772,6 @@ def app_streamlit():
                         )
                         if robust_count < coverage_plan.redundancy
                         and radio_count >= coverage_plan.redundancy
-                    ]
-                    deficient_points = [
-                        point
-                        for point, radio_count in zip(
-                            coverage_plan.evaluation_points,
-                            final_radio_counts,
-                        )
-                        if radio_count < coverage_plan.redundancy
                     ]
                     if compliant_points:
                         ax_cov.scatter(
@@ -1758,23 +1783,34 @@ def app_streamlit():
                             alpha=0.45,
                             zorder=2,
                         )
-                    if lateral_points:
+                    if partial_points:
                         ax_cov.scatter(
-                            [point[0] for point in lateral_points],
-                            [point[1] for point in lateral_points],
+                            [point[0] for point in partial_points],
+                            [point[1] for point in partial_points],
                             color="darkorange",
                             marker="o",
-                            s=14,
-                            alpha=0.65,
+                            s=18,
+                            alpha=0.75,
                             zorder=3,
                         )
-                    if deficient_points:
+                    if uncovered_points:
                         ax_cov.scatter(
-                            [point[0] for point in deficient_points],
-                            [point[1] for point in deficient_points],
+                            [point[0] for point in uncovered_points],
+                            [point[1] for point in uncovered_points],
                             color="tab:red",
                             marker="x",
                             s=24,
+                            linewidth=0.8,
+                            zorder=4,
+                        )
+                    if lateral_fallback_points:
+                        ax_cov.scatter(
+                            [point[0] for point in lateral_fallback_points],
+                            [point[1] for point in lateral_fallback_points],
+                            facecolors="none",
+                            edgecolors="goldenrod",
+                            marker="o",
+                            s=34,
                             linewidth=0.8,
                             zorder=4,
                         )
@@ -1845,18 +1881,28 @@ def app_streamlit():
                                 [0], [0], marker=".", color="tab:green", linestyle="none",
                                 markersize=8,
                                 label=(
-                                    "Redundancia robusta HPBW"
+                                    f"Cobertura robusta {coverage_plan.redundancy}× HPBW"
                                     if coverage_plan.require_hpbw_redundancy
                                     else "Cumple redundancia RF"
                                 ),
                             ),
                             Line2D(
                                 [0], [0], marker="o", color="darkorange", linestyle="none",
-                                markersize=5, label="Solo lóbulos laterales",
+                                markersize=5,
+                                label=(
+                                    "Cobertura parcial: solo 1 gateway"
+                                    if coverage_plan.redundancy == 2
+                                    else "Cobertura menor que la redundancia exigida"
+                                ),
                             ),
                             Line2D(
                                 [0], [0], marker="x", color="tab:red", linestyle="none",
-                                markersize=6, label="Cobertura insuficiente",
+                                markersize=6, label="Sin cobertura robusta",
+                            ),
+                            Line2D(
+                                [0], [0], marker="o", color="goldenrod",
+                                markerfacecolor="none", linestyle="none",
+                                markersize=6, label="RF suficiente solo fuera del HPBW",
                             ),
                         ]
                     )
@@ -1892,8 +1938,14 @@ def app_streamlit():
                 plt.close(fig_cov)
                 st.caption(
                     "La figura azul representa la huella nominal al HPBW y alcance máximo en boresight. "
-                    "Verde exige redundancia dentro del HPBW; amarillo conserva redundancia RF solamente "
-                    "mediante uno o más lóbulos laterales; rojo no alcanza la redundancia por link budget. "
+                    f"Verde significa {coverage_plan.redundancy} o más gateways dentro del HPBW; "
+                    + (
+                        "naranjo significa exactamente un gateway y rojo ninguno. "
+                        if coverage_plan.redundancy == 2
+                        else "naranjo significa cobertura parcial y rojo ninguno. "
+                    )
+                    + "El aro amarillo indica "
+                    "que el link budget solo se completa usando señal fuera del haz principal. "
                     "La leyenda se muestra fuera del área evaluada."
                 )
 

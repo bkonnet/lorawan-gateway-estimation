@@ -32,7 +32,7 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Flechas de orientación recortadas al primer límite del área para evitar representaciones engañosas.
 - Huellas circulares para antenas omnidireccionales y conos HPBW para antenas direccionales.
 - Círculo isotrópico de referencia a 0 dBi y verificación punto a punto de la redundancia final.
-- Estrategia balanceada que muestrea explícitamente perímetros, entrantes, zonas angostas y componentes separados.
+- Estrategia balanceada que verifica internamente a doble densidad y muestrea explícitamente perímetros, entrantes, zonas angostas y componentes separados.
 - Prioridad de perímetro y preferencia de dispersión configurables para evitar concentrar innecesariamente los gateways en el centro.
 - Distribución SF derivada del link budget y la geometría.
 - Exportación de ubicaciones preliminares en CSV y GeoJSON.

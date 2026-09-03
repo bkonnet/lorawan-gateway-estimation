@@ -356,6 +356,37 @@ class CoverageModelTests(unittest.TestCase):
         boundary_weights = plan.evaluation_weights[-plan.boundary_point_count :]
         self.assertTrue(all(weight == 3.0 for weight in boundary_weights))
 
+    def test_internal_verification_grid_is_twice_as_dense_as_requested(self):
+        geometry = parse_geojson(SQUARE)
+        requested_resolution = 200
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(),
+            redundancy=1,
+            resolution_m=requested_resolution,
+        )
+        self.assertLessEqual(
+            plan.effective_resolution_m,
+            requested_resolution / 2,
+        )
+
+    def test_link_analysis_can_audit_additional_points(self):
+        geometry = parse_geojson(SQUARE)
+        plan = plan_coverage(
+            geometry,
+            RadioConfig(),
+            redundancy=1,
+            resolution_m=200,
+        )
+        audit_points = plan.evaluation_points[:3]
+        analysis = deployment_link_analysis(
+            plan,
+            plan.selected_points,
+            plan.selected_azimuths_deg,
+            evaluation_points=audit_points,
+        )
+        self.assertEqual(len(analysis), len(audit_points))
+
     def test_boundary_points_are_available_as_gateway_candidates(self):
         geometry = parse_geojson(SQUARE)
         preset = ANTENNA_PRESETS["Sectorial 60° × 35°"]

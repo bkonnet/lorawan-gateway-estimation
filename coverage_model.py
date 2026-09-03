@@ -917,13 +917,19 @@ def deployment_link_analysis(
     plan: CoveragePlan,
     gateway_points: list[tuple[float, float]],
     gateway_azimuths_deg: list[float],
+    evaluation_points: Iterable[tuple[float, float]] | None = None,
 ) -> list[dict[str, float | int]]:
     """Return point-level redundant link margins for a deployed network."""
     if len(gateway_points) != len(gateway_azimuths_deg):
         raise ValueError("Cada gateway debe tener exactamente un azimut.")
+    points_to_evaluate = (
+        plan.evaluation_points
+        if evaluation_points is None
+        else list(evaluation_points)
+    )
     radius_squared = plan.radius_m * plan.radius_m
     analysis: list[dict[str, float | int]] = []
-    for point in plan.evaluation_points:
+    for point in points_to_evaluate:
         links: list[tuple[float, float, float, bool]] = []
         for gateway, azimuth in zip(gateway_points, gateway_azimuths_deg):
             if (
@@ -1087,7 +1093,7 @@ def ray_length_within_geometry(
 ) -> float:
     """Return the first in-polygon ray length, useful for map arrows."""
     maximum_length_m = max(float(maximum_length_m), 0.0)
-    if maximum_length_m == 0 or not geometry.contains(start):
+    if maximum_length_m == 0:
         return 0.0
     angle = math.radians(azimuth_deg)
 
@@ -1098,6 +1104,13 @@ def ray_length_within_geometry(
         )
 
     step = max(maximum_length_m / 80.0, 1.0)
+    # Candidate sites may lie exactly on a sampled polygon boundary. Depending
+    # on the ray-casting parity that coordinate can be classified as outside,
+    # so inspect a small point along the boresight before rejecting the arrow.
+    if not geometry.contains(start) and not geometry.contains(
+        point_at(min(step * 0.25, 0.5))
+    ):
+        return 0.0
     last_inside = 0.0
     distance = step
     while distance <= maximum_length_m:
@@ -1135,10 +1148,14 @@ def plan_coverage(
     edge_priority = max(float(edge_priority), 1.0)
     dispersion_weight = min(max(float(dispersion_weight), 0.0), 1.0)
     radius_m = coverage_radius_m(config)
+    # Treat the requested resolution as the largest design cell and verify at
+    # twice that density. This prevents a narrow gap between visible samples
+    # from being accepted as fully covered.
+    verification_spacing_m = max(float(resolution_m) / 2.0, 10.0)
     boundary_budget = max(min(max_evaluation_points // 3, 1_000), 100)
     interior_budget = max(max_evaluation_points - boundary_budget, 100)
     interior_evaluation_points, effective_resolution = _grid_points(
-        geometry, resolution_m, interior_budget
+        geometry, verification_spacing_m, interior_budget
     )
     boundary_points = _sample_boundary_points(
         geometry,
@@ -1164,8 +1181,23 @@ def plan_coverage(
         candidate_points = []
         candidate_azimuths_deg = []
         candidate_site_ids = []
+        minimum_inward_boresight_m = min(
+            max(effective_resolution / 2.0, 25.0),
+            radius_m * 0.20,
+        )
         for site_id, point in enumerate(candidate_sites):
             for azimuth in azimuth_options:
+                if (
+                    not antenna.is_omnidirectional
+                    and ray_length_within_geometry(
+                        geometry,
+                        point,
+                        azimuth,
+                        radius_m * 0.20,
+                    )
+                    <= minimum_inward_boresight_m
+                ):
+                    continue
                 candidate_points.append(point)
                 candidate_azimuths_deg.append(azimuth)
                 candidate_site_ids.append(site_id)
@@ -1262,7 +1294,7 @@ def plan_coverage(
         obstacles,
     )
     warnings: list[str] = []
-    if effective_resolution > resolution_m * 1.05:
+    if effective_resolution > verification_spacing_m * 1.05:
         warnings.append(
             f"La resolución se ajustó automáticamente a {effective_resolution:.0f} m "
             "para limitar el costo de cálculo."
