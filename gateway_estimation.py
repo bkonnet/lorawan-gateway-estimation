@@ -1965,7 +1965,12 @@ def app_streamlit():
                 )
                 fig_cov.subplots_adjust(right=0.72)
                 coverage_map_buffer = BytesIO()
-                fig_cov.canvas.print_png(coverage_map_buffer)
+                fig_cov.savefig(
+                    coverage_map_buffer,
+                    format="png",
+                    dpi=110,
+                    facecolor="white",
+                )
                 coverage_map_png = coverage_map_buffer.getvalue()
                 coverage_map_png_base64 = base64.b64encode(
                     coverage_map_png
@@ -2033,7 +2038,12 @@ def app_streamlit():
 
             plt.tight_layout()
             capacity_chart_buffer = BytesIO()
-            fig.canvas.print_png(capacity_chart_buffer)
+            fig.savefig(
+                capacity_chart_buffer,
+                format="png",
+                dpi=110,
+                facecolor="white",
+            )
             capacity_chart_png = capacity_chart_buffer.getvalue()
             capacity_charts_png_base64 = base64.b64encode(
                 capacity_chart_png
