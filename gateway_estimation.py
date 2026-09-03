@@ -2209,6 +2209,7 @@ def app_streamlit():
                     st.session_state.pop("_active_obstacles", None)
                 st.session_state["_prefer_restored_obstacles"] = True
                 if snapshot.get("input_state"):
+                    st.session_state["_refresh_saved_estimation_name"] = name
                     st.session_state["_loaded_estimation_notice"] = (
                         f"Estimación '{name}' cargada y recalculada con sus parámetros guardados."
                     )
@@ -2225,6 +2226,18 @@ def app_streamlit():
                 on_change=load_selected_estimation,
             )
             selected_snapshot = st.session_state.saved_estimations[selected_name]
+            refresh_saved_name = st.session_state.pop("_refresh_saved_estimation_name", None)
+            if refresh_saved_name == selected_name:
+                refreshed_figures = current_snapshot.get("figures") or {}
+                if any(refreshed_figures.values()):
+                    refreshed_snapshot = dict(selected_snapshot)
+                    refreshed_snapshot["snapshot_version"] = current_snapshot.get(
+                        "snapshot_version", 5
+                    )
+                    refreshed_snapshot["figures"] = dict(refreshed_figures)
+                    st.session_state.saved_estimations[selected_name] = refreshed_snapshot
+                    selected_snapshot = refreshed_snapshot
+
             saved_summary = selected_snapshot.get("summary", {})
             st.dataframe(
                 pd.DataFrame(
@@ -2251,6 +2264,9 @@ def app_streamlit():
                     type="primary",
                 )
             with saved_pdf_col:
+                saved_figures = selected_snapshot.get("figures") or {}
+                if not any(saved_figures.values()):
+                    st.caption("Cárgala antes de exportar para incorporar sus mapas y gráficos.")
                 st.download_button(
                     "Descargar PDF guardado",
                     build_pdf_report(selected_snapshot),
