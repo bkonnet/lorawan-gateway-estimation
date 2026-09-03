@@ -1938,16 +1938,12 @@ def app_streamlit():
                 )
                 fig_cov.subplots_adjust(right=0.72)
                 coverage_map_buffer = BytesIO()
-                fig_cov.savefig(
-                    coverage_map_buffer,
-                    format="png",
-                    dpi=110,
-                    facecolor="white",
-                )
+                fig_cov.canvas.print_png(coverage_map_buffer)
+                coverage_map_png = coverage_map_buffer.getvalue()
                 coverage_map_png_base64 = base64.b64encode(
-                    coverage_map_buffer.getvalue()
+                    coverage_map_png
                 ).decode("ascii")
-                st.pyplot(fig_cov)
+                st.image(coverage_map_png, use_container_width=True)
                 plt.close(fig_cov)
                 st.caption(
                     "La figura azul representa la huella nominal al HPBW y alcance máximo en boresight. "
@@ -2010,16 +2006,12 @@ def app_streamlit():
 
             plt.tight_layout()
             capacity_chart_buffer = BytesIO()
-            fig.savefig(
-                capacity_chart_buffer,
-                format="png",
-                dpi=110,
-                facecolor="white",
-            )
+            fig.canvas.print_png(capacity_chart_buffer)
+            capacity_chart_png = capacity_chart_buffer.getvalue()
             capacity_charts_png_base64 = base64.b64encode(
-                capacity_chart_buffer.getvalue()
+                capacity_chart_png
             ).decode("ascii")
-            st.pyplot(fig)
+            st.image(capacity_chart_png, use_container_width=True)
             plt.close(fig)
 
         scenario_parameters = {
