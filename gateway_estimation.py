@@ -1941,8 +1941,7 @@ def app_streamlit():
                 fig_cov.savefig(
                     coverage_map_buffer,
                     format="png",
-                    dpi=170,
-                    bbox_inches="tight",
+                    dpi=110,
                     facecolor="white",
                 )
                 coverage_map_png_base64 = base64.b64encode(
@@ -2014,8 +2013,7 @@ def app_streamlit():
             fig.savefig(
                 capacity_chart_buffer,
                 format="png",
-                dpi=170,
-                bbox_inches="tight",
+                dpi=110,
                 facecolor="white",
             )
             capacity_charts_png_base64 = base64.b64encode(
