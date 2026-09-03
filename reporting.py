@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime
 from io import BytesIO
 import json
@@ -17,6 +18,8 @@ try:
     from reportlab.lib.units import mm
     from reportlab.platypus import (
         KeepTogether,
+        Image as RLImage,
+        PageBreak,
         Paragraph,
         SimpleDocTemplate,
         Spacer,
@@ -141,6 +144,26 @@ def _data_table(headers, rows, styles, widths=None):
     return table
 
 
+def _image_from_base64(value, max_width, max_height):
+    """Decode and proportionally fit a stored PNG for the PDF report."""
+    if not value:
+        return None
+    try:
+        image_bytes = base64.b64decode(value, validate=True)
+        image = RLImage(BytesIO(image_bytes))
+    except (ValueError, TypeError, OSError):
+        return None
+    scale = min(
+        max_width / max(float(image.imageWidth), 1.0),
+        max_height / max(float(image.imageHeight), 1.0),
+        1.0,
+    )
+    image.drawWidth = image.imageWidth * scale
+    image.drawHeight = image.imageHeight * scale
+    image.hAlign = "CENTER"
+    return image
+
+
 def _page_footer(canvas, doc):
     canvas.saveState()
     canvas.setStrokeColor(colors.HexColor("#D2D9E1"))
@@ -176,10 +199,12 @@ def build_pdf_report(snapshot: dict) -> bytes:
     styles.add(ParagraphStyle(name="TableHeader", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=7.5, leading=9, alignment=TA_CENTER, textColor=colors.white))
     styles.add(ParagraphStyle(name="TableCell", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.3, leading=9, alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="Note", parent=styles["BodyText"], fontName="Helvetica", fontSize=8.5, leading=11, textColor=colors.HexColor("#5A4A00"), backColor=colors.HexColor("#FFF7D6"), borderPadding=6, spaceAfter=5))
+    styles.add(ParagraphStyle(name="FigureCaption", parent=styles["BodyText"], fontName="Helvetica-Oblique", fontSize=8, leading=10, alignment=TA_CENTER, textColor=colors.HexColor("#607080"), spaceBefore=3))
 
     summary = snapshot.get("summary", {})
     parameters = snapshot.get("parameters", {})
     coverage = snapshot.get("coverage") or {}
+    figures = snapshot.get("figures") or {}
     story = [
         _paragraph(snapshot.get("name", "Estimación LoRaWAN"), styles["ReportTitle"]),
         _paragraph(
@@ -211,6 +236,42 @@ def build_pdf_report(snapshot: dict) -> bytes:
             [
                 _paragraph("Cobertura geográfica", styles["Section"]),
                 _kv_table([(key, value) for key, value in coverage.items()], styles),
+            ]
+        )
+
+    coverage_map = _image_from_base64(
+        figures.get("coverage_map_png_base64"),
+        250 * mm,
+        155 * mm,
+    )
+    if coverage_map is not None:
+        story.extend(
+            [
+                PageBreak(),
+                _paragraph("Mapa de cobertura y redundancia", styles["Section"]),
+                coverage_map,
+                _paragraph(
+                    "Ubicaciones propuestas, orientación de antenas, huellas HPBW y verificación espacial de la redundancia.",
+                    styles["FigureCaption"],
+                ),
+            ]
+        )
+
+    capacity_charts = _image_from_base64(
+        figures.get("capacity_charts_png_base64"),
+        250 * mm,
+        92 * mm,
+    )
+    if capacity_charts is not None:
+        story.extend(
+            [
+                PageBreak(),
+                _paragraph("Gráficos de capacidad y airtime", styles["Section"]),
+                capacity_charts,
+                _paragraph(
+                    "Carga uplink, tiempo de aire de ACK en RX1/RX2 y consumo de airtime downlink por spreading factor.",
+                    styles["FigureCaption"],
+                ),
             ]
         )
 

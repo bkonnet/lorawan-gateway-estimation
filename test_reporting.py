@@ -53,6 +53,16 @@ class ReportingTests(unittest.TestCase):
                     "downtilt_deg": 5,
                 }
             ],
+            "figures": {
+                "coverage_map_png_base64": (
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                    "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                ),
+                "capacity_charts_png_base64": (
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                    "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                ),
+            },
         }
 
     def test_filename_is_portable(self):
@@ -66,6 +76,7 @@ class ReportingTests(unittest.TestCase):
         pdf = build_pdf_report(self.sample_snapshot())
         self.assertTrue(pdf.startswith(b"%PDF"))
         self.assertGreater(len(pdf), 2500)
+        self.assertGreaterEqual(pdf.count(b"/Subtype /Image"), 2)
 
 
 if __name__ == "__main__":

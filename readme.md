@@ -40,7 +40,7 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Guardado de múltiples estimaciones con nombre durante la sesión.
 - Carga automática de todos los controles y del polígono al seleccionar una estimación guardada.
 - Exportación/importación de la cartera de escenarios en JSON.
-- Informe PDF descargable para la estimación actual o cualquier escenario guardado.
+- Informe PDF descargable con mapa de cobertura, gráficos de capacidad/airtime, tablas y ubicaciones para la estimación actual o cualquier escenario guardado.
 - Gráficos de carga uplink, airtime ACK y comparación RX1/RX2.
 
 ---

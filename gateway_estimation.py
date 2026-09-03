@@ -3,6 +3,7 @@ import json
 import math
 from dataclasses import replace
 from datetime import datetime
+from io import BytesIO
 
 import pandas as pd
 
@@ -731,6 +732,8 @@ def app_streamlit():
     obstacle_bytes = None
     coverage_sensitivity_plans = []
     path_loss_sensitivity_rows = []
+    coverage_map_png_base64 = None
+    capacity_charts_png_base64 = None
 
     if coverage_enabled:
         st.info(
@@ -1934,6 +1937,17 @@ def app_streamlit():
                     borderaxespad=0.0,
                 )
                 fig_cov.subplots_adjust(right=0.72)
+                coverage_map_buffer = BytesIO()
+                fig_cov.savefig(
+                    coverage_map_buffer,
+                    format="png",
+                    dpi=170,
+                    bbox_inches="tight",
+                    facecolor="white",
+                )
+                coverage_map_png_base64 = base64.b64encode(
+                    coverage_map_buffer.getvalue()
+                ).decode("ascii")
                 st.pyplot(fig_cov)
                 plt.close(fig_cov)
                 st.caption(
@@ -1996,6 +2010,17 @@ def app_streamlit():
             axes[2].grid(True, axis="y", linestyle="--", alpha=0.4)
 
             plt.tight_layout()
+            capacity_chart_buffer = BytesIO()
+            fig.savefig(
+                capacity_chart_buffer,
+                format="png",
+                dpi=170,
+                bbox_inches="tight",
+                facecolor="white",
+            )
+            capacity_charts_png_base64 = base64.b64encode(
+                capacity_chart_buffer.getvalue()
+            ).decode("ascii")
             st.pyplot(fig)
             plt.close(fig)
 
@@ -2083,7 +2108,7 @@ def app_streamlit():
             }
 
         current_snapshot = {
-            "snapshot_version": 4,
+            "snapshot_version": 5,
             "name": "Estimación actual",
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "input_state": capture_estimation_input_state(st.session_state),
@@ -2118,6 +2143,10 @@ def app_streamlit():
             "warnings": list(advertencias) + (list(coverage_plan.warnings) if coverage_plan else []),
             "details": json.loads(df.to_json(orient="records")),
             "sites": json.loads(sites_df.to_json(orient="records")) if sites_df is not None else [],
+            "figures": {
+                "coverage_map_png_base64": coverage_map_png_base64,
+                "capacity_charts_png_base64": capacity_charts_png_base64,
+            },
         }
 
         st.divider()
