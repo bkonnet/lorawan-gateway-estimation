@@ -44,6 +44,22 @@ except ImportError:
     Patch = None
     Wedge = None
 
+
+if st is not None:
+    @st.cache_data(show_spinner=False, max_entries=16)
+    def cached_parse_polygon_file(filename, value, projection=None):
+        """Parse each uploaded geometry once per file/projection combination."""
+        return parse_polygon_file(filename, value, projection=projection)
+
+
+    @st.cache_data(show_spinner=False, max_entries=24)
+    def cached_plan_coverage(*args, **kwargs):
+        """Reuse identical RF optimizations across Streamlit reruns."""
+        return plan_coverage(*args, **kwargs)
+else:
+    cached_parse_polygon_file = parse_polygon_file
+    cached_plan_coverage = plan_coverage
+
 """
 Estimador interactivo de gateways LoRaWAN para AU915-928
 =========================================================
@@ -173,9 +189,6 @@ def restorable_input_state(snapshot: dict) -> dict:
             for key, value in stored.items()
             if key in ESTIMATION_WIDGET_KEYS
         }
-        restored.setdefault("input_require_hpbw_redundancy", True)
-        restored.setdefault("input_analyze_path_loss_range", True)
-        restored.setdefault("input_path_loss_variation", 0.3)
         return restored
 
     parameters = snapshot.get("parameters") or {}
@@ -1072,11 +1085,11 @@ def app_streamlit():
         with sensitivity_col1:
             analyze_path_loss_range = st.checkbox(
                 "Calcular rango por incertidumbre del exponente",
-                value=True,
+                value=False,
                 key="input_analyze_path_loss_range",
                 help=(
-                    "Calcula escenarios favorable, base y crítico sin modificar los demás "
-                    "parámetros del link budget."
+                    "Ejecuta dos optimizaciones adicionales (favorable y crítica). Active esta "
+                    "opción para el informe final, después de ajustar el escenario base."
                 ),
             )
         with sensitivity_col2:
@@ -1156,11 +1169,11 @@ def app_streamlit():
 
         if polygon_bytes is not None:
             try:
-                coverage_geometry = parse_polygon_file(
+                coverage_geometry = cached_parse_polygon_file(
                     polygon_name, polygon_bytes
                 )
                 coverage_obstacles = (
-                    parse_polygon_file(
+                    cached_parse_polygon_file(
                         obstacle_name,
                         obstacle_bytes,
                         projection=coverage_geometry.projection,
@@ -1200,7 +1213,7 @@ def app_streamlit():
                     gateway_height_m=float(gateway_height),
                     device_height_m=float(device_height),
                 )
-                coverage_plan = plan_coverage(
+                coverage_plan = cached_plan_coverage(
                     coverage_geometry,
                     radio_config,
                     antenna=antenna_config,
@@ -1220,7 +1233,7 @@ def app_streamlit():
                         scenario_plan = (
                             coverage_plan
                             if scenario_name == "Base"
-                            else plan_coverage(
+                            else cached_plan_coverage(
                                 coverage_geometry,
                                 replace(
                                     radio_config,
@@ -1270,14 +1283,25 @@ def app_streamlit():
                 with st.expander("Comparar perfiles de antena en este polígono"):
                     st.caption(
                         "La comparación mantiene ambiente, redundancia, EIRP, alturas y resolución. "
-                        "Cada perfil usa su ganancia, HPBW y downtilt iniciales."
+                        "Cada perfil usa su ganancia, HPBW y downtilt iniciales. Ejecuta tres "
+                        "optimizaciones adicionales."
+                    )
+                    run_antenna_comparison = st.checkbox(
+                        "Calcular comparación de antenas",
+                        value=False,
+                        key="run_antenna_comparison",
                     )
                     comparison_rows = []
-                    for comparison_name in (
-                        "Omnidireccional",
-                        "Sectorial 60° × 35°",
-                        "Direccional 30° × 30°",
-                    ):
+                    comparison_names = (
+                        (
+                            "Omnidireccional",
+                            "Sectorial 60° × 35°",
+                            "Direccional 30° × 30°",
+                        )
+                        if run_antenna_comparison
+                        else ()
+                    )
+                    for comparison_name in comparison_names:
                         comparison_preset = ANTENNA_PRESETS[comparison_name]
                         comparison_antenna = AntennaConfig(
                             antenna_type=comparison_name,
@@ -1319,7 +1343,7 @@ def app_streamlit():
                             ),
                             maximum_obstacle_loss_db=float(maximum_obstacle_loss),
                         )
-                        comparison_plan = plan_coverage(
+                        comparison_plan = cached_plan_coverage(
                             coverage_geometry,
                             comparison_radio,
                             antenna=comparison_antenna,
@@ -1344,11 +1368,14 @@ def app_streamlit():
                                 "Redundancia lograda": f"{comparison_plan.coverage_fraction:.1%}",
                             }
                         )
-                    st.dataframe(
-                        pd.DataFrame(comparison_rows),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                    if comparison_rows:
+                        st.dataframe(
+                            pd.DataFrame(comparison_rows),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    else:
+                        st.info("Activa la comparación solo cuando necesites evaluar alternativas.")
 
                 use_coverage_distribution = st.checkbox(
                     "Usar la distribución SF derivada de la cobertura en el cálculo de capacidad",

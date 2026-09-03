@@ -8,6 +8,7 @@ The result is a planning estimate, not a substitute for a calibrated RF survey.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import cached_property
 from io import BytesIO
 import json
 import math
@@ -105,7 +106,7 @@ class ProjectedGeometry:
     polygons: list[list[list[tuple[float, float]]]]
     projection: LocalProjection
 
-    @property
+    @cached_property
     def bounds(self) -> tuple[float, float, float, float]:
         points = [point for polygon in self.polygons for ring in polygon for point in ring]
         return (
@@ -115,7 +116,7 @@ class ProjectedGeometry:
             max(point[1] for point in points),
         )
 
-    @property
+    @cached_property
     def area_m2(self) -> float:
         total = 0.0
         for polygon in self.polygons:
@@ -131,7 +132,7 @@ class ProjectedGeometry:
                 return True
         return False
 
-    @property
+    @cached_property
     def polygon_bounds(self) -> list[tuple[float, float, float, float]]:
         return [
             (
