@@ -840,6 +840,11 @@ def app_streamlit():
             index=list(ENVIRONMENT_PRESETS.keys()).index("Terminal de contenedores"),
             key="input_environment",
             on_change=environment_preset_changed,
+            help=(
+                "Carga valores iniciales para exponente, pérdida adicional y margen de "
+                "desvanecimiento. Es un punto de partida editable; no incorpora la "
+                "interferencia medida por el gateway."
+            ),
         )
         environment = ENVIRONMENT_PRESETS[environment_name]
 
@@ -895,6 +900,10 @@ def app_streamlit():
                 float(antenna_preset["gain_dbi"]),
                 0.5,
                 key="input_gateway_gain",
+                help=(
+                    "Ganancia máxima en la dirección principal. Aumenta el alcance en boresight; "
+                    "en antenas sectoriales no se aplica por igual en todas las direcciones."
+                ),
             )
             cable_loss = st.number_input(
                 "Pérdidas cable/conectores (dB)",
@@ -903,6 +912,10 @@ def app_streamlit():
                 2.0,
                 0.5,
                 key="input_cable_loss",
+                help=(
+                    "Pérdida entre la antena y el receptor del gateway. Reduce solamente el "
+                    "uplink en este modelo. Use cable, conectores, protectores y splitters reales."
+                ),
             )
         with cov3:
             horizontal_beamwidth = st.number_input(
@@ -912,6 +925,10 @@ def app_streamlit():
                 float(antenna_preset["horizontal_beamwidth_deg"]),
                 5.0,
                 key="input_horizontal_beamwidth",
+                help=(
+                    "Ancho angular horizontal del lóbulo principal medido a -3 dB. Un valor menor "
+                    "concentra cobertura y exige orientar más cuidadosamente cada gateway."
+                ),
             )
             vertical_beamwidth = st.number_input(
                 "Haz vertical HPBW (°)",
@@ -920,6 +937,10 @@ def app_streamlit():
                 float(antenna_preset["vertical_beamwidth_deg"]),
                 5.0,
                 key="input_vertical_beamwidth",
+                help=(
+                    "Ancho vertical del lóbulo principal a -3 dB. Junto con altura y downtilt "
+                    "determina si la energía pasa por encima o alcanza los dispositivos."
+                ),
             )
             max_antenna_attenuation = st.number_input(
                 "Atenuación lateral/trasera máx. (dB)",
@@ -928,15 +949,24 @@ def app_streamlit():
                 float(antenna_preset["max_attenuation_db"]),
                 1.0,
                 key="input_max_antenna_attenuation",
+                help=(
+                    "Límite de pérdida fuera del lóbulo principal. Valores altos hacen menos "
+                    "útiles los lóbulos laterales y traseros; no representa obstáculos."
+                ),
             )
         with cov4:
             gateway_height = st.number_input(
                 "Altura del gateway (m)", 2.0, 100.0, 20.0, 1.0,
                 key="input_gateway_height",
+                help=(
+                    "Altura de la antena del gateway sobre el terreno. Afecta el ángulo vertical "
+                    "del enlace, pero el modelo no calcula difracción 3D por altura de contenedores."
+                ),
             )
             device_height = st.number_input(
                 "Altura del dispositivo (m)", 0.0, 20.0, 1.5, 0.5,
                 key="input_device_height",
+                help="Altura típica de la antena del dispositivo sobre el terreno.",
             )
             downtilt = st.number_input(
                 "Downtilt hacia el suelo (°)",
@@ -945,6 +975,10 @@ def app_streamlit():
                 float(antenna_preset["downtilt_deg"]),
                 1.0,
                 key="input_downtilt",
+                help=(
+                    "Inclinación vertical hacia el suelo. Ayuda a iluminar el patio desde antenas "
+                    "altas; demasiado downtilt reduce el alcance hacia los extremos."
+                ),
             )
 
         require_hpbw_redundancy = st.checkbox(
@@ -988,6 +1022,10 @@ def app_streamlit():
                 30.0,
                 1.0,
                 key="input_gateway_tx_eirp",
+                help=(
+                    "Potencia radiada total del gateway durante ACK/downlink, después de ganancia "
+                    "y pérdidas. Afecta downlink, no la recepción uplink."
+                ),
             )
         with device_col4:
             device_sensitivity = st.number_input(
@@ -1033,6 +1071,11 @@ def app_streamlit():
                         default_sensitivities[sf_label],
                         0.5,
                         key=f"input_sensitivity_{sf_label}",
+                        help=(
+                            f"Sensibilidad nominal del gateway para {sf_label} y BW125. Use la "
+                            "ficha técnica sin agregar aquí margen, pérdidas ni interferencia; "
+                            "la aplicación los aplica por separado."
+                        ),
                     )
 
         interference_col, effective_sensitivity_col = st.columns(2)
@@ -1045,10 +1088,10 @@ def app_streamlit():
                 1.0,
                 key="input_uplink_interference",
                 help=(
-                    "Penalización uniforme del receptor del gateway por elevación del piso RF. "
-                    "Afecta solo el uplink; no modifica propagación, downlink ni margen de "
-                    "desvanecimiento. Como referencia inicial, 12 dB aproxima el P80 del punto "
-                    "ThingPark más limpio analizado."
+                    "Eleva uniformemente el umbral de recepción del gateway y afecta solo uplink. "
+                    "Use noise rise derivado del noise scan: piso RF medido menos piso nominal. "
+                    "No lo repita en Pérdida adicional ni Margen de desvanecimiento. Como referencia "
+                    "inicial, 12 dB aproxima el P80 del punto ThingPark más limpio analizado."
                 ),
             )
         with effective_sensitivity_col:
@@ -1061,14 +1104,23 @@ def app_streamlit():
                 help="Sensibilidad nominal más la penalización de interferencia uplink.",
             )
 
+        # Incorporar la interferencia directamente en la tabla de sensibilidad mantiene
+        # compatibilidad con versiones anteriores de coverage_model.py. De este modo la
+        # interfaz y el modelo no dependen de un argumento nuevo en RadioConfig.
+        effective_sf_sensitivities = tuple(
+            float(sf_sensitivities[sf_label]) + float(uplink_interference)
+            for sf_label in SF_ORDER
+        )
+
         rf1, rf2, rf3, rf4 = st.columns(4)
         with rf1:
             resolution_m = st.number_input(
                 "Resolución de evaluación (m)", 25.0, 1000.0, 100.0, 25.0,
                 key="input_resolution",
                 help=(
-                    "Tamaño máximo de la celda de diseño. El modelo verifica internamente "
-                    "con una malla dos veces más densa para detectar huecos entre puntos."
+                    "Separación aproximada de los puntos donde se comprueba cobertura. Valores "
+                    "menores detectan huecos pequeños, pero aumentan mucho el tiempo de cálculo. "
+                    "No modifica el alcance RF; solo la precisión espacial de la evaluación."
                 ),
             )
             minimum_site_separation = st.number_input(
@@ -1078,7 +1130,11 @@ def app_streamlit():
                 100.0,
                 25.0,
                 key="input_minimum_site_separation",
-                help="Impide que distintas orientaciones en una misma coordenada se contabilicen como gateways redundantes. También distribuye los gateways añadidos por capacidad.",
+                help=(
+                    "Distancia mínima entre gateways físicos. Evita sitios colocalizados y ayuda a "
+                    "diversidad espacial. Si es excesiva, puede impedir alcanzar la cobertura o "
+                    "redundancia solicitada."
+                ),
             )
         with rf2:
             path_loss_exponent = st.number_input(
@@ -1088,6 +1144,12 @@ def app_streamlit():
                 float(environment["path_loss_exponent"]),
                 0.1,
                 key="input_path_loss_exponent",
+                help=(
+                    "Controla cuánto aumenta la pérdida con la distancia: 10·n·log10(d). No es una "
+                    "pérdida fija; por eso pequeños cambios afectan especialmente los puntos lejanos. "
+                    "Calíbrelo con la pendiente de varias mediciones RSSI a distintas distancias, "
+                    "no con el noise scan."
+                ),
             )
         with rf3:
             additional_loss = st.number_input(
@@ -1097,6 +1159,12 @@ def app_streamlit():
                 float(environment["additional_loss_db"]),
                 1.0,
                 key="input_additional_loss",
+                help=(
+                    "Atenuación fija del trayecto aplicada tanto a uplink como a downlink, por "
+                    "fenómenos no incluidos en distancia ni obstáculos explícitos. Numéricamente se "
+                    "suma al margen de desvanecimiento, pero representa pérdida media, no variación. "
+                    "No ingrese aquí la interferencia RF del gateway."
+                ),
             )
         with rf4:
             fade_margin = st.number_input(
@@ -1106,6 +1174,12 @@ def app_streamlit():
                 float(environment["fade_margin_db"]),
                 1.0,
                 key="input_fade_margin",
+                help=(
+                    "Reserva fija exigida sobre el enlace para variaciones temporales, multipath, "
+                    "movimiento y errores del modelo. No representa la pérdida media. Si el exponente "
+                    "o la pérdida adicional ya fueron calibrados al peor caso, reduzca este margen "
+                    "para evitar contar dos veces la misma variabilidad."
+                ),
             )
 
         sensitivity_col1, sensitivity_col2 = st.columns(2)
@@ -1115,8 +1189,9 @@ def app_streamlit():
                 value=False,
                 key="input_analyze_path_loss_range",
                 help=(
-                    "Ejecuta dos optimizaciones adicionales (favorable y crítica). Active esta "
-                    "opción para el informe final, después de ajustar el escenario base."
+                    "Ejecuta dos optimizaciones adicionales cambiando únicamente el exponente. "
+                    "Sirve para visualizar incertidumbre de propagación; no agrega margen ni "
+                    "interferencia. Active para el informe final después de ajustar el caso base."
                 ),
             )
         with sensitivity_col2:
@@ -1128,7 +1203,32 @@ def app_streamlit():
                 0.1,
                 key="input_path_loss_variation",
                 disabled=not analyze_path_loss_range,
-                help="Con base 3,6 y variación 0,3 se evalúan 3,3 / 3,6 / 3,9.",
+                help=(
+                    "Rango de incertidumbre de n. Con base 3,6 y ±0,3 se evalúan 3,3 / 3,6 / 3,9. "
+                    "No se suma como dB: vuelve a calcular la pérdida dependiente de distancia."
+                ),
+            )
+
+        with st.expander("Cómo se combinan los parámetros RF y evitar duplicaciones"):
+            st.markdown(
+                """
+**El modelo separa dos partes:**
+
+1. **Señal que llega:** distancia y exponente + pérdida adicional + instalación/puerta + obstáculos + patrón de antena.
+2. **Umbral que debe superar:** sensibilidad nominal del gateway + interferencia uplink + margen de desvanecimiento.
+
+| Parámetro | Qué representa | Dónde actúa | Riesgo de duplicación |
+|---|---|---|---|
+| Exponente de pérdida | Crecimiento de la atenuación con distancia | UL y DL, más fuerte lejos | Con pérdida adicional si ambos se ajustan usando el mismo error RSSI |
+| Pérdida adicional | Atenuación media fija del trayecto | UL y DL, igual en toda distancia | Con margen si se calibró usando mediciones de peor caso |
+| Margen de desvanecimiento | Reserva para variaciones e incertidumbre | UL y DL, fijo | Con parámetros ya calibrados al peor caso |
+| Interferencia RF uplink | Elevación del piso de recepción del gateway | Solo UL, fijo y general | Con pérdida adicional o sensibilidad editada manualmente |
+
+**Importante:** pérdida adicional y margen tienen el mismo efecto numérico por cada dB sobre el
+resultado final, pero se mantienen separados para distinguir pérdida media de reserva. El exponente
+no es equivalente: su efecto crece con la distancia. El noise scan ThingPark debe alimentar solo
+Interferencia RF uplink.
+"""
             )
 
         obstacle_col1, obstacle_col2 = st.columns(2)
@@ -1152,6 +1252,10 @@ def app_streamlit():
                 1.0,
                 key="input_maximum_obstacle_loss",
                 disabled=obstacle_bytes is None,
+                help=(
+                    "Tope a la suma de pérdidas por todos los bloques atravesados. Evita que una "
+                    "ruta con muchos polígonos acumule una penalización irreal o duplicada."
+                ),
             )
 
         strategy_name = st.selectbox(
@@ -1218,11 +1322,7 @@ def app_streamlit():
                     device_receiver_sensitivity_dbm=float(device_sensitivity),
                     validate_downlink=bool(validate_downlink),
                     target_sf=target_sf,
-                    sf_sensitivities_dbm=tuple(
-                        float(sf_sensitivities[sf_label])
-                        for sf_label in SF_ORDER
-                    ),
-                    uplink_interference_db=float(uplink_interference),
+                    sf_sensitivities_dbm=effective_sf_sensitivities,
                     path_loss_exponent=float(path_loss_exponent),
                     additional_loss_db=float(additional_loss),
                     fade_margin_db=float(fade_margin),
@@ -1357,11 +1457,7 @@ def app_streamlit():
                             device_receiver_sensitivity_dbm=float(device_sensitivity),
                             validate_downlink=bool(validate_downlink),
                             target_sf=target_sf,
-                            sf_sensitivities_dbm=tuple(
-                                float(sf_sensitivities[sf_label])
-                                for sf_label in SF_ORDER
-                            ),
-                            uplink_interference_db=float(uplink_interference),
+                            sf_sensitivities_dbm=effective_sf_sensitivities,
                             path_loss_exponent=float(path_loss_exponent),
                             additional_loss_db=float(additional_loss),
                             fade_margin_db=float(fade_margin),
@@ -2114,9 +2210,9 @@ def app_streamlit():
                 "Puntos de evaluación del perímetro": coverage_plan.boundary_point_count,
                 "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
                 "SF máximo de diseño": target_sf,
-                "Sensibilidad gateway objetivo": f"{radio_config.receiver_sensitivity_dbm:.1f} dBm",
+                "Sensibilidad gateway objetivo": f"{float(sf_sensitivities[target_sf]):.1f} dBm",
                 "Interferencia RF uplink general": f"{uplink_interference:.1f} dB",
-                "Sensibilidad gateway efectiva": f"{radio_config.effective_receiver_sensitivity_dbm:.1f} dBm",
+                "Sensibilidad gateway efectiva": f"{effective_target_sensitivity:.1f} dBm",
                 "Enlace exigido": "Uplink + downlink" if validate_downlink else "Solo uplink",
                 "Potencia TX dispositivo": f"{tx_eirp:.1f} dBm",
                 "Ganancia antena dispositivo": f"{device_antenna_gain:.1f} dBi",
