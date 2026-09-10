@@ -161,6 +161,7 @@ class RadioConfig:
     device_receiver_sensitivity_dbm: float = -129.0
     validate_downlink: bool = True
     sf_sensitivities_dbm: tuple[float, ...] = tuple(SF_SENSITIVITY_DBM.values())
+    uplink_interference_db: float = 0.0
     obstacle_loss_db: float = 0.0
     maximum_obstacle_loss_db: float = 40.0
 
@@ -168,11 +169,21 @@ class RadioConfig:
     def receiver_sensitivity_dbm(self) -> float:
         return self.sensitivity_for_sf(self.target_sf)
 
+    @property
+    def effective_receiver_sensitivity_dbm(self) -> float:
+        """Gateway sensitivity after a uniform uplink RF noise-rise penalty."""
+        return self.effective_sensitivity_for_sf(self.target_sf)
+
     def sensitivity_for_sf(self, sf_label: str) -> float:
         labels = tuple(SF_SENSITIVITY_DBM)
         if len(self.sf_sensitivities_dbm) != len(labels):
             raise ValueError("Debe configurar una sensibilidad para cada SF7-SF12.")
         return float(self.sf_sensitivities_dbm[labels.index(sf_label)])
+
+    def effective_sensitivity_for_sf(self, sf_label: str) -> float:
+        return self.sensitivity_for_sf(sf_label) + max(
+            float(self.uplink_interference_db), 0.0
+        )
 
 
 @dataclass(frozen=True)
@@ -503,7 +514,7 @@ def coverage_radius_m(config: RadioConfig) -> float:
         config.tx_eirp_dbm
         + config.gateway_gain_dbi
         - config.gateway_cable_loss_db
-        - config.receiver_sensitivity_dbm
+        - config.effective_receiver_sensitivity_dbm
         - config.fade_margin_db
         - config.additional_loss_db
         - config.device_installation_loss_db
@@ -680,7 +691,7 @@ def link_margins_db(
         link_received_power_dbm(
             gateway, device, azimuth_deg, radio, antenna, obstacles
         )
-        - radio.receiver_sensitivity_dbm
+        - radio.effective_receiver_sensitivity_dbm
     )
     downlink_margin = (
         downlink_received_power_dbm(
@@ -864,7 +875,7 @@ def _sf_for_power(
     config: RadioConfig,
 ) -> str:
     for sf_label in ("SF7", "SF8", "SF9", "SF10", "SF11", "SF12"):
-        if received_dbm >= config.sensitivity_for_sf(sf_label) + fade_margin_db:
+        if received_dbm >= config.effective_sensitivity_for_sf(sf_label) + fade_margin_db:
             return sf_label
     return "SF12"
 

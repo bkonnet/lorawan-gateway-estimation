@@ -168,6 +168,7 @@ ESTIMATION_WIDGET_KEYS = (
     "input_sensitivity_SF10",
     "input_sensitivity_SF11",
     "input_sensitivity_SF12",
+    "input_uplink_interference",
 )
 
 
@@ -1034,6 +1035,32 @@ def app_streamlit():
                         key=f"input_sensitivity_{sf_label}",
                     )
 
+        interference_col, effective_sensitivity_col = st.columns(2)
+        with interference_col:
+            uplink_interference = st.number_input(
+                "Interferencia RF uplink general (dB)",
+                0.0,
+                60.0,
+                0.0,
+                1.0,
+                key="input_uplink_interference",
+                help=(
+                    "Penalización uniforme del receptor del gateway por elevación del piso RF. "
+                    "Afecta solo el uplink; no modifica propagación, downlink ni margen de "
+                    "desvanecimiento. Como referencia inicial, 12 dB aproxima el P80 del punto "
+                    "ThingPark más limpio analizado."
+                ),
+            )
+        with effective_sensitivity_col:
+            effective_target_sensitivity = (
+                float(sf_sensitivities[target_sf]) + float(uplink_interference)
+            )
+            st.metric(
+                f"Sensibilidad efectiva {target_sf}",
+                f"{effective_target_sensitivity:.1f} dBm",
+                help="Sensibilidad nominal más la penalización de interferencia uplink.",
+            )
+
         rf1, rf2, rf3, rf4 = st.columns(4)
         with rf1:
             resolution_m = st.number_input(
@@ -1195,6 +1222,7 @@ def app_streamlit():
                         float(sf_sensitivities[sf_label])
                         for sf_label in SF_ORDER
                     ),
+                    uplink_interference_db=float(uplink_interference),
                     path_loss_exponent=float(path_loss_exponent),
                     additional_loss_db=float(additional_loss),
                     fade_margin_db=float(fade_margin),
@@ -1333,6 +1361,7 @@ def app_streamlit():
                                 float(sf_sensitivities[sf_label])
                                 for sf_label in SF_ORDER
                             ),
+                            uplink_interference_db=float(uplink_interference),
                             path_loss_exponent=float(path_loss_exponent),
                             additional_loss_db=float(additional_loss),
                             fade_margin_db=float(fade_margin),
@@ -2086,6 +2115,8 @@ def app_streamlit():
                 "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
                 "SF máximo de diseño": target_sf,
                 "Sensibilidad gateway objetivo": f"{radio_config.receiver_sensitivity_dbm:.1f} dBm",
+                "Interferencia RF uplink general": f"{uplink_interference:.1f} dB",
+                "Sensibilidad gateway efectiva": f"{radio_config.effective_receiver_sensitivity_dbm:.1f} dBm",
                 "Enlace exigido": "Uplink + downlink" if validate_downlink else "Solo uplink",
                 "Potencia TX dispositivo": f"{tx_eirp:.1f} dBm",
                 "Ganancia antena dispositivo": f"{device_antenna_gain:.1f} dBi",
@@ -2135,7 +2166,7 @@ def app_streamlit():
             }
 
         current_snapshot = {
-            "snapshot_version": 5,
+            "snapshot_version": 6,
             "name": "Estimación actual",
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "input_state": capture_estimation_input_state(st.session_state),
@@ -2259,7 +2290,7 @@ def app_streamlit():
                 if any(refreshed_figures.values()):
                     refreshed_snapshot = dict(selected_snapshot)
                     refreshed_snapshot["snapshot_version"] = current_snapshot.get(
-                        "snapshot_version", 5
+                        "snapshot_version", 6
                     )
                     refreshed_snapshot["figures"] = dict(refreshed_figures)
                     st.session_state.saved_estimations[selected_name] = refreshed_snapshot
