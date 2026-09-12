@@ -134,6 +134,7 @@ ESTIMATION_WIDGET_KEYS = (
     "input_antenna",
     "input_redundancy",
     "input_require_hpbw_redundancy",
+    "input_max_sectors_per_site",
     "input_target_sf",
     "input_tx_eirp",
     "input_device_antenna_gain",
@@ -169,6 +170,8 @@ ESTIMATION_WIDGET_KEYS = (
     "input_sensitivity_SF11",
     "input_sensitivity_SF12",
     "input_uplink_interference",
+    "input_spatial_rejection_enabled",
+    "input_spatial_rejection_db",
 )
 
 
@@ -239,6 +242,7 @@ def antenna_preset_input_state(antenna_name: str) -> dict:
         "input_vertical_beamwidth": float(preset["vertical_beamwidth_deg"]),
         "input_max_antenna_attenuation": float(preset["max_attenuation_db"]),
         "input_downtilt": float(preset["downtilt_deg"]),
+        "input_max_sectors_per_site": int(preset["max_sectors_per_site"]),
     }
 
 
@@ -250,6 +254,13 @@ def environment_preset_input_state(environment_name: str) -> dict:
         "input_additional_loss": float(preset["additional_loss_db"]),
         "input_fade_margin": float(preset["fade_margin_db"]),
     }
+
+
+def initialize_environment_preset_defaults(state, environment_name: str) -> None:
+    """Fill only missing preset-owned values, preserving every manual edit."""
+    for key, value in environment_preset_input_state(environment_name).items():
+        if key not in state:
+            state[key] = value
 
 
 def calcular_toa(sf: int, payload_bytes: int, bw: int = 125_000) -> float:
@@ -827,6 +838,15 @@ def app_streamlit():
             obstacle_name = active_obstacles["name"]
             obstacle_bytes = base64.b64decode(active_obstacles["data_base64"])
             st.info(f"Obstáculos restaurados: {obstacle_name}")
+        initial_environment_name = st.session_state.get(
+            "input_environment", "Terminal de contenedores"
+        )
+        if initial_environment_name not in ENVIRONMENT_PRESETS:
+            initial_environment_name = "Terminal de contenedores"
+        initialize_environment_preset_defaults(
+            st.session_state, initial_environment_name
+        )
+
         def environment_preset_changed():
             environment_state = environment_preset_input_state(
                 st.session_state["input_environment"]
@@ -861,7 +881,7 @@ def app_streamlit():
             index=list(ANTENNA_PRESETS.keys()).index("Sectorial 60° × 35°"),
             key="input_antenna",
             on_change=antenna_preset_changed,
-            help="El modelo considera una antena y un azimut por gateway.",
+            help="Cada radio/antena tiene un azimut; un sitio físico puede alojar varios sectores.",
         )
         antenna_preset = ANTENNA_PRESETS[antenna_name]
 
@@ -991,6 +1011,20 @@ def app_streamlit():
                 "laterales pueden mostrarse en el mapa, pero no satisfacen la redundancia robusta."
             ),
         )
+        max_sectors_per_site = st.number_input(
+            "Máximo de sectores/antenas por sitio físico",
+            min_value=1,
+            max_value=16,
+            value=int(antenna_preset["max_sectors_per_site"]),
+            step=1,
+            key="input_max_sectors_per_site",
+            disabled=horizontal_beamwidth >= 359.0,
+            help=(
+                "Permite colocalizar antenas orientadas en un mismo sitio. Cada sector consume "
+                "un radio en el dimensionamiento, pero varios sectores del mismo sitio cuentan "
+                "solo una vez para la redundancia geográfica."
+            ),
+        )
 
         st.markdown("##### Dispositivo, sensibilidades y enlace de retorno")
         device_col1, device_col2, device_col3, device_col4 = st.columns(4)
@@ -1078,7 +1112,7 @@ def app_streamlit():
                         ),
                     )
 
-        interference_col, effective_sensitivity_col = st.columns(2)
+        interference_col, rejection_col, effective_sensitivity_col = st.columns(3)
         with interference_col:
             uplink_interference = st.number_input(
                 "Interferencia RF uplink general (dB)",
@@ -1094,22 +1128,48 @@ def app_streamlit():
                     "inicial, 12 dB aproxima el P80 del punto ThingPark más limpio analizado."
                 ),
             )
+        with rejection_col:
+            spatial_rejection_enabled = st.checkbox(
+                "Modelar rechazo espacial direccional",
+                value=False,
+                key="input_spatial_rejection_enabled",
+                disabled=horizontal_beamwidth >= 359.0,
+                help=(
+                    "Beneficio opcional y explícito: reduce solo la penalización de interferencia "
+                    "uplink para antenas no omnidireccionales. No cambia potencia, patrón ni downlink."
+                ),
+            )
+            spatial_rejection_db = st.number_input(
+                "Rechazo espacial asumido (dB)",
+                0.0,
+                30.0,
+                0.0,
+                0.5,
+                key="input_spatial_rejection_db",
+                disabled=not spatial_rejection_enabled or horizontal_beamwidth >= 359.0,
+                help=(
+                    "Se descuenta de la interferencia general, con piso 0 dB. Debe provenir de "
+                    "mediciones o de una hipótesis de escenario documentada."
+                ),
+            )
+        applied_spatial_rejection = (
+            float(spatial_rejection_db)
+            if spatial_rejection_enabled and horizontal_beamwidth < 359.0
+            else 0.0
+        )
         with effective_sensitivity_col:
             effective_target_sensitivity = (
-                float(sf_sensitivities[target_sf]) + float(uplink_interference)
+                float(sf_sensitivities[target_sf])
+                + max(float(uplink_interference) - applied_spatial_rejection, 0.0)
             )
             st.metric(
                 f"Sensibilidad efectiva {target_sf}",
                 f"{effective_target_sensitivity:.1f} dBm",
-                help="Sensibilidad nominal más la penalización de interferencia uplink.",
+                help="Sensibilidad nominal más la interferencia residual después del rechazo opcional.",
             )
 
-        # Incorporar la interferencia directamente en la tabla de sensibilidad mantiene
-        # compatibilidad con versiones anteriores de coverage_model.py. De este modo la
-        # interfaz y el modelo no dependen de un argumento nuevo en RadioConfig.
-        effective_sf_sensitivities = tuple(
-            float(sf_sensitivities[sf_label]) + float(uplink_interference)
-            for sf_label in SF_ORDER
+        nominal_sf_sensitivities = tuple(
+            float(sf_sensitivities[sf_label]) for sf_label in SF_ORDER
         )
 
         rf1, rf2, rf3, rf4 = st.columns(4)
@@ -1322,7 +1382,9 @@ Interferencia RF uplink.
                     device_receiver_sensitivity_dbm=float(device_sensitivity),
                     validate_downlink=bool(validate_downlink),
                     target_sf=target_sf,
-                    sf_sensitivities_dbm=effective_sf_sensitivities,
+                    sf_sensitivities_dbm=nominal_sf_sensitivities,
+                    uplink_interference_db=float(uplink_interference),
+                    directional_interference_rejection_db=applied_spatial_rejection,
                     path_loss_exponent=float(path_loss_exponent),
                     additional_loss_db=float(additional_loss),
                     fade_margin_db=float(fade_margin),
@@ -1340,6 +1402,7 @@ Interferencia RF uplink.
                     downtilt_deg=float(downtilt),
                     gateway_height_m=float(gateway_height),
                     device_height_m=float(device_height),
+                    max_sectors_per_site=int(max_sectors_per_site),
                 )
                 coverage_plan = cached_plan_coverage(
                     coverage_geometry,
@@ -1384,19 +1447,23 @@ Interferencia RF uplink.
                         coverage_sensitivity_plans.append(
                             (scenario_name, float(scenario_exponent), scenario_plan)
                         )
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Superficie", f"{coverage_plan.area_m2 / 1_000_000:.2f} km²")
                 m2.metric("Radio máximo en boresight", f"{coverage_plan.radius_m:.0f} m")
-                m3.metric("Gateways por cobertura", len(coverage_plan.selected_points))
-                m4.metric("Puntos con redundancia", f"{coverage_plan.coverage_fraction:.1%}")
+                m3.metric("Sitios físicos", coverage_plan.physical_site_count)
+                m4.metric("Radios/antenas", coverage_plan.radio_count)
+                m5.metric("Cobertura robusta", f"{coverage_plan.coverage_fraction:.1%}")
                 st.caption(
-                    f"Modelo: una antena {antenna_name} por gateway, ganancia {gateway_gain:.1f} dBi, "
+                    f"Modelo: hasta {coverage_plan.max_sectors_per_site} antena(s) {antenna_name} por sitio, "
+                    f"un radio por antena, ganancia {gateway_gain:.1f} dBi, "
                     f"HPBW {horizontal_beamwidth:.0f}° × {vertical_beamwidth:.0f}° y downtilt {downtilt:.0f}°."
                     f" Referencia isotrópica 0 dBi: {coverage_plan.isotropic_radius_m:.0f} m."
                     f" Verificación: {len(coverage_plan.evaluation_points)} puntos, incluyendo "
                     f"{coverage_plan.boundary_point_count} puntos específicos de perímetro. "
                     f"Paso interno efectivo: {coverage_plan.effective_resolution_m:.0f} m. "
                     f"Enlace exigido: {'uplink + downlink' if validate_downlink else 'solo uplink'}. "
+                    f"Candidatos: {coverage_plan.candidate_site_count} sitios físicos y "
+                    f"{len(coverage_plan.candidate_points)} orientaciones. "
                     f"Redundancia: {'dentro del HPBW horizontal' if require_hpbw_redundancy else 'por link budget, incluidos lóbulos laterales'}."
                 )
                 if coverage_obstacles is not None:
@@ -1446,6 +1513,9 @@ Interferencia RF uplink.
                             downtilt_deg=float(comparison_preset["downtilt_deg"]),
                             gateway_height_m=float(gateway_height),
                             device_height_m=float(device_height),
+                            max_sectors_per_site=int(
+                                comparison_preset["max_sectors_per_site"]
+                            ),
                         )
                         comparison_radio = RadioConfig(
                             tx_eirp_dbm=float(tx_eirp),
@@ -1457,7 +1527,14 @@ Interferencia RF uplink.
                             device_receiver_sensitivity_dbm=float(device_sensitivity),
                             validate_downlink=bool(validate_downlink),
                             target_sf=target_sf,
-                            sf_sensitivities_dbm=effective_sf_sensitivities,
+                            sf_sensitivities_dbm=nominal_sf_sensitivities,
+                            uplink_interference_db=float(uplink_interference),
+                            directional_interference_rejection_db=(
+                                float(spatial_rejection_db)
+                                if spatial_rejection_enabled
+                                and not comparison_antenna.is_omnidirectional
+                                else 0.0
+                            ),
                             path_loss_exponent=float(path_loss_exponent),
                             additional_loss_db=float(additional_loss),
                             fade_margin_db=float(fade_margin),
@@ -1480,6 +1557,35 @@ Interferencia RF uplink.
                             dispersion_weight=float(dispersion_weight),
                             obstacles=coverage_obstacles,
                         )
+                        comparison_analysis = deployment_link_analysis(
+                            comparison_plan,
+                            comparison_plan.selected_points,
+                            comparison_plan.selected_azimuths_deg,
+                        )
+                        comparison_radio_fraction = (
+                            sum(
+                                int(item["radio_count"]) >= comparison_plan.redundancy
+                                for item in comparison_analysis
+                            )
+                            / len(comparison_analysis)
+                            if comparison_analysis
+                            else 0.0
+                        )
+                        comparison_surpluses = sorted(
+                            float(item["design_surplus_db"])
+                            for item in comparison_analysis
+                            if math.isfinite(float(item["design_surplus_db"]))
+                        )
+                        comparison_p10 = (
+                            comparison_surpluses[
+                                min(
+                                    int((len(comparison_surpluses) - 1) * 0.10),
+                                    len(comparison_surpluses) - 1,
+                                )
+                            ]
+                            if comparison_surpluses
+                            else -math.inf
+                        )
                         comparison_rows.append(
                             {
                                 "Antena": comparison_name,
@@ -1489,8 +1595,23 @@ Interferencia RF uplink.
                                     f"{comparison_antenna.vertical_beamwidth_deg:.0f}°"
                                 ),
                                 "Radio boresight (m)": round(comparison_plan.radius_m),
-                                "Gateways cobertura": len(comparison_plan.selected_points),
-                                "Redundancia lograda": f"{comparison_plan.coverage_fraction:.1%}",
+                                "Sitios físicos": comparison_plan.physical_site_count,
+                                "Radios": comparison_plan.radio_count,
+                                "Sectores/antenas": comparison_plan.antenna_count,
+                                "Cobertura robusta": f"{comparison_plan.coverage_fraction:.1%}",
+                                "Cobertura RF total": f"{comparison_radio_fraction:.1%}",
+                                "Margen mínimo (dB)": (
+                                    round(comparison_surpluses[0], 1)
+                                    if comparison_surpluses else "sin enlace"
+                                ),
+                                "Margen P10 (dB)": (
+                                    round(comparison_p10, 1)
+                                    if math.isfinite(comparison_p10) else "sin enlace"
+                                ),
+                                "Distribución SF": ", ".join(
+                                    f"{sf} {comparison_plan.sf_distribution[sf]:.1%}"
+                                    for sf in SF_ORDER
+                                ),
                             }
                         )
                     if comparison_rows:
@@ -1561,15 +1682,15 @@ Interferencia RF uplink.
 
         st.subheader("Resultado de dimensionamiento")
         gateways_capacidad = resumen["gateways_recomendados"]
-        gateways_cobertura = (
-            len(coverage_plan.selected_points) if coverage_plan is not None else 0
-        )
+        gateways_cobertura = coverage_plan.radio_count if coverage_plan is not None else 0
+        sitios_cobertura = coverage_plan.physical_site_count if coverage_plan is not None else 0
         gateways_finales = max(gateways_capacidad, gateways_cobertura, 1)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Gateways finales recomendados", gateways_finales)
-        c2.metric("Gateways por capacidad", gateways_capacidad)
-        c3.metric("Gateways por cobertura", gateways_cobertura if coverage_plan else "sin polígono")
-        c4.metric("Condición dominante", "cobertura" if gateways_cobertura > gateways_capacidad else resumen["cuello_botella"])
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Radios finales recomendados", gateways_finales)
+        c2.metric("Sitios físicos por cobertura", sitios_cobertura if coverage_plan else "sin polígono")
+        c3.metric("Radios/antenas por cobertura", gateways_cobertura if coverage_plan else "sin polígono")
+        c4.metric("Radios por capacidad", gateways_capacidad)
+        c5.metric("Condición dominante", "cobertura" if gateways_cobertura > gateways_capacidad else resumen["cuello_botella"])
 
         if coverage_sensitivity_plans:
             for scenario_name, scenario_exponent, scenario_plan in coverage_sensitivity_plans:
@@ -1584,7 +1705,7 @@ Interferencia RF uplink.
                     else run_capacity_estimate(scenario_distribution)[1]
                 )
                 scenario_capacity = int(scenario_summary["gateways_recomendados"])
-                scenario_coverage = len(scenario_plan.selected_points)
+                scenario_coverage = scenario_plan.radio_count
                 scenario_final = max(scenario_capacity, scenario_coverage, 1)
                 path_loss_sensitivity_rows.append(
                     {
@@ -1592,8 +1713,9 @@ Interferencia RF uplink.
                         "Exponente n": round(scenario_exponent, 2),
                         "Radio boresight (m)": round(scenario_plan.radius_m),
                         "Gateways capacidad": scenario_capacity,
-                        "Gateways cobertura": scenario_coverage,
-                        "Gateways finales": scenario_final,
+                        "Sitios físicos": scenario_plan.physical_site_count,
+                        "Radios cobertura": scenario_coverage,
+                        "Radios finales": scenario_final,
                         "Cobertura robusta": f"{scenario_plan.coverage_fraction:.1%}",
                         "Estado": (
                             "Resuelto"
@@ -1604,20 +1726,20 @@ Interferencia RF uplink.
                 )
 
             base_final = next(
-                row["Gateways finales"]
+                row["Radios finales"]
                 for row in path_loss_sensitivity_rows
                 if row["Escenario"] == "Base"
             )
             for row in path_loss_sensitivity_rows:
-                row["Variación vs base"] = row["Gateways finales"] - base_final
+                row["Variación vs base"] = row["Radios finales"] - base_final
 
             st.subheader("Rango por incertidumbre del exponente de pérdida")
             display_sensitivity_rows = []
             for row in path_loss_sensitivity_rows:
                 display_row = dict(row)
                 if row["Estado"] != "Resuelto":
-                    display_row["Gateways finales"] = (
-                        f"{row['Gateways finales']} usados (incompleto)"
+                    display_row["Radios finales"] = (
+                        f"{row['Radios finales']} usados (incompleto)"
                     )
                     display_row["Variación vs base"] = "—"
                 display_sensitivity_rows.append(display_row)
@@ -1637,13 +1759,13 @@ Interferencia RF uplink.
             )
             if resolved_scenarios:
                 resolved_minimum = min(
-                    row["Gateways finales"] for row in resolved_scenarios
+                    row["Radios finales"] for row in resolved_scenarios
                 )
                 resolved_maximum = max(
-                    row["Gateways finales"] for row in resolved_scenarios
+                    row["Radios finales"] for row in resolved_scenarios
                 )
                 base_text = (
-                    str(base_row["Gateways finales"])
+                    str(base_row["Radios finales"])
                     if base_row["Estado"] == "Resuelto"
                     else "no resuelto"
                 )
@@ -1654,7 +1776,7 @@ Interferencia RF uplink.
                 )
             if incomplete_scenarios:
                 incomplete_description = "; ".join(
-                    f"{row['Escenario']}: {row['Gateways finales']} gateways usados, "
+                    f"{row['Escenario']}: {row['Radios finales']} radios usados, "
                     f"{row['Cobertura robusta']} de cobertura robusta"
                     for row in incomplete_scenarios
                 )
@@ -1677,14 +1799,14 @@ Interferencia RF uplink.
 
         sites_df = None
         if coverage_plan is not None and coverage_geometry is not None:
-            st.subheader("Ubicaciones preliminares de gateways")
+            st.subheader("Despliegue preliminar: sitios, radios y antenas")
             final_sites, final_azimuths = augment_gateway_deployments(
                 coverage_plan, gateways_finales
             )
             if len(final_sites) < gateways_finales:
                 st.warning(
-                    f"El modelo requiere {gateways_finales} gateways, pero solo pudo ubicar "
-                    f"{len(final_sites)} sitios distintos respetando una separación mínima de "
+                    f"El modelo requiere {gateways_finales} radios, pero solo pudo ubicar "
+                    f"{len(final_sites)} radios/antenas respetando una separación mínima de "
                     f"{minimum_site_separation:.0f} m. Reduzca la separación, aumente la "
                     "resolución espacial de candidatos o habilite ubicaciones adicionales."
                 )
@@ -1723,6 +1845,10 @@ Interferencia RF uplink.
                 if final_radio_counts
                 else 0.0
             )
+            final_site_keys = list(dict.fromkeys(
+                (round(point[0], 6), round(point[1], 6)) for point in final_sites
+            ))
+            final_physical_site_count = len(final_site_keys)
             all_surpluses = sorted(
                 float(item["design_surplus_db"])
                 for item in final_link_analysis
@@ -1738,9 +1864,9 @@ Interferencia RF uplink.
                 if all_surpluses
                 else -math.inf
             )
-            verification_col1, verification_col2, verification_col3, verification_col4, verification_col5, verification_col6 = st.columns(6)
+            verification_col1, verification_col2, verification_col3, verification_col4, verification_col5, verification_col6, verification_col7, verification_col8 = st.columns(8)
             verification_col1.metric(
-                "Cobertura final verificada",
+                "Cobertura robusta",
                 f"{final_coverage_fraction:.1%}",
             )
             verification_col2.metric(
@@ -1749,7 +1875,7 @@ Interferencia RF uplink.
             )
             verification_col3.metric(
                 "Redundancia exigida",
-                f"{coverage_plan.redundancy} gateways",
+                f"{coverage_plan.redundancy} sitios",
             )
             verification_col4.metric(
                 "RF incl. laterales",
@@ -1765,6 +1891,8 @@ Interferencia RF uplink.
                 "Margen P10 vs diseño",
                 f"{percentile_10_surplus:.1f} dB" if math.isfinite(percentile_10_surplus) else "sin enlace",
             )
+            verification_col7.metric("Sitios físicos", final_physical_site_count)
+            verification_col8.metric("Radios / antenas", len(final_sites))
             st.caption(
                 f"Desglose de la malla interna: {covered_evaluation_points} puntos cumplen "
                 f"{coverage_plan.redundancy}×; {partially_covered_evaluation_points} tienen "
@@ -1795,20 +1923,37 @@ Interferencia RF uplink.
                     "que todavía no cumplen la redundancia robusta. Las zonas dependientes de lóbulos "
                     "laterales se muestran en amarillo y las que no tienen redundancia RF, en rojo."
                 )
-            sites_df = pd.DataFrame(
-                [
+            site_number_by_key = {
+                key: index for index, key in enumerate(final_site_keys, start=1)
+            }
+            antenna_number_by_site = {}
+            site_rows = []
+            for index, ((lon, lat), point, azimuth) in enumerate(
+                zip(lon_lat_sites, final_sites, final_azimuths), start=1
+            ):
+                site_number = site_number_by_key[
+                    (round(point[0], 6), round(point[1], 6))
+                ]
+                antenna_number_by_site[site_number] = (
+                    antenna_number_by_site.get(site_number, 0) + 1
+                )
+                site_rows.append(
                     {
+                        "site_id": f"SITE-{site_number:02d}",
+                        "radio_id": f"RADIO-{index:02d}",
+                        "sector_antenna_id": (
+                            f"SITE-{site_number:02d}-ANT-{antenna_number_by_site[site_number]:02d}"
+                        ),
                         "gateway": f"GW-{index:02d}",
                         "longitude": lon,
                         "latitude": lat,
                         "antena": coverage_plan.antenna_config.antenna_type,
                         "ganancia_dbi": coverage_plan.antenna_config.gain_dbi,
-                        "azimuth_deg": round(final_azimuths[index - 1], 1),
+                        "azimuth_deg": round(azimuth, 1),
                         "downtilt_deg": coverage_plan.antenna_config.downtilt_deg,
                     }
-                    for index, (lon, lat) in enumerate(lon_lat_sites, start=1)
-                ]
-            )
+                )
+            sites_df = pd.DataFrame(site_rows)
             st.map(sites_df, latitude="latitude", longitude="longitude", size=60)
             st.dataframe(sites_df, use_container_width=True, hide_index=True)
             if plt is not None:
@@ -2209,9 +2354,22 @@ Interferencia RF uplink.
                 "Preferencia de dispersión": float(dispersion_weight),
                 "Puntos de evaluación del perímetro": coverage_plan.boundary_point_count,
                 "Redundancia lograda": f"{coverage_plan.coverage_fraction:.1%}",
+                "Sitios físicos": final_physical_site_count,
+                "Radios": len(final_sites),
+                "Sectores / antenas": len(final_sites),
+                "Sitios físicos candidatos": coverage_plan.candidate_site_count,
+                "Orientaciones candidatas": len(coverage_plan.candidate_points),
                 "SF máximo de diseño": target_sf,
                 "Sensibilidad gateway objetivo": f"{float(sf_sensitivities[target_sf]):.1f} dBm",
                 "Interferencia RF uplink general": f"{uplink_interference:.1f} dB",
+                "Rechazo espacial direccional": (
+                    f"{applied_spatial_rejection:.1f} dB (habilitado)"
+                    if applied_spatial_rejection > 0
+                    else "Desactivado"
+                ),
+                "Interferencia uplink residual": (
+                    f"{max(float(uplink_interference) - applied_spatial_rejection, 0.0):.1f} dB"
+                ),
                 "Sensibilidad gateway efectiva": f"{effective_target_sensitivity:.1f} dBm",
                 "Enlace exigido": "Uplink + downlink" if validate_downlink else "Solo uplink",
                 "Potencia TX dispositivo": f"{tx_eirp:.1f} dBm",
@@ -2237,7 +2395,7 @@ Interferencia RF uplink.
                 "Rango de gateways por exponente": (
                     "; ".join(
                         f"{row['Escenario']} n={row['Exponente n']}: "
-                        f"{row['Gateways finales']} ({row['Estado'].lower()})"
+                        f"{row['Radios finales']} radios ({row['Estado'].lower()})"
                         for row in path_loss_sensitivity_rows
                     )
                     if path_loss_sensitivity_rows
@@ -2262,7 +2420,7 @@ Interferencia RF uplink.
             }
 
         current_snapshot = {
-            "snapshot_version": 6,
+            "snapshot_version": 7,
             "name": "Estimación actual",
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "input_state": capture_estimation_input_state(st.session_state),
@@ -2287,6 +2445,9 @@ Interferencia RF uplink.
                 "gateways_finales": gateways_finales,
                 "gateways_por_capacidad": gateways_capacidad,
                 "gateways_por_cobertura": gateways_cobertura if coverage_plan else "Sin polígono",
+                "sitios_fisicos": final_physical_site_count if coverage_plan else "Sin polígono",
+                "radios": len(final_sites) if coverage_plan else gateways_finales,
+                "sectores_antenas": len(final_sites) if coverage_plan else gateways_finales,
                 "condicion_dominante": "cobertura" if gateways_cobertura > gateways_capacidad else resumen["cuello_botella"],
                 "gateways_por_uplink": resumen["gateways_por_uplink"],
                 "gateways_por_airtime_ack": resumen["gateways_por_airtime_ack"],

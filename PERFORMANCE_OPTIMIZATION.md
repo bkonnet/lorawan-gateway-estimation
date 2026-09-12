@@ -8,11 +8,14 @@ This branch is intentionally isolated from `main` so the original estimator rema
 
 1. **Shared uplink/downlink link-budget work**: distance, antenna attenuation, obstacle crossings and path loss are calculated once per candidate/device pair instead of twice.
 2. **Incremental farthest-point sampling**: `_spread_sample_points` keeps the current minimum distance for every available point instead of recalculating distance to every previously selected point on every iteration.
+3. **Non-overlapping azimuth grid**: directional candidates are spaced by one HPBW. Adjacent beams meet at their -3 dB edges, avoiding the previous redundant half-beam orientation grid.
+
+The core planner now caps **physical candidate sites** independently of azimuth count. The same site density is used for omni, sector and directional alternatives; orientation expansion is reported separately. The default physical-site budget is 200.
 
 The launcher also prints one server-side performance line after every uncached coverage optimization:
 
 ```text
-[coverage-performance] total=2.913s evaluation_points=1842 candidates=486 candidate_point_pairs=895212 selected_gateways=4
+[coverage-performance] total=2.913s evaluation_points=1842 candidate_sites=200 candidate_orientations=1200 candidate_point_pairs=2210400 selected_sites=3 selected_radios=6
 ```
 
 This makes it possible to compare identical scenarios without changing the RF result structures or the existing Streamlit UI.
@@ -37,8 +40,8 @@ Use the same polygon/KMZ and the same RF parameters. For each version, restart S
 
 - total wall-clock time until the coverage result appears;
 - evaluation point count;
-- candidate count;
-- selected gateway count;
+- physical candidate-site and orientation counts;
+- selected physical-site and radio/antenna counts;
 - coverage fraction;
 - SF distribution.
 

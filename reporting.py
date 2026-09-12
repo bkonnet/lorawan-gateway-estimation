@@ -214,9 +214,11 @@ def build_pdf_report(snapshot: dict) -> bytes:
         _paragraph("Resumen ejecutivo", styles["Section"]),
         _kv_table(
             [
-                ("Gateways finales recomendados", summary.get("gateways_finales")),
-                ("Gateways por capacidad", summary.get("gateways_por_capacidad")),
-                ("Gateways por cobertura", summary.get("gateways_por_cobertura", "Sin polígono")),
+                ("Radios finales recomendados", summary.get("radios", summary.get("gateways_finales"))),
+                ("Sitios físicos", summary.get("sitios_fisicos", "Sin polígono")),
+                ("Sectores / antenas", summary.get("sectores_antenas", summary.get("gateways_finales"))),
+                ("Radios por capacidad", summary.get("gateways_por_capacidad")),
+                ("Radios por cobertura", summary.get("gateways_por_cobertura", "Sin polígono")),
                 ("Condición dominante", summary.get("condicion_dominante")),
                 ("Gateways por uplink", summary.get("gateways_por_uplink")),
                 ("Gateways por ACK airtime", summary.get("gateways_por_airtime_ack")),
@@ -300,11 +302,16 @@ def build_pdf_report(snapshot: dict) -> bytes:
 
     sites = snapshot.get("sites") or []
     if sites:
-        story.extend([Spacer(1, 6 * mm), _paragraph("Ubicaciones preliminares de gateways", styles["Section"])])
-        site_keys = ["gateway", "longitude", "latitude", "antena", "ganancia_dbi", "azimuth_deg", "downtilt_deg"]
-        site_headers = ["Gateway", "Longitud", "Latitud", "Antena", "Ganancia dBi", "Azimut", "Downtilt"]
+        story.extend([Spacer(1, 6 * mm), _paragraph("Sitios, radios y sectores preliminares", styles["Section"])])
+        if any(row.get("site_id") for row in sites):
+            site_keys = ["site_id", "radio_id", "sector_antenna_id", "longitude", "latitude", "antena", "azimuth_deg", "downtilt_deg"]
+            site_headers = ["Sitio", "Radio", "Sector/antena", "Longitud", "Latitud", "Antena", "Azimut", "Downtilt"]
+        else:
+            # Version 6 and older stored one undifferentiated gateway per row.
+            site_keys = ["gateway", "gateway", "gateway", "longitude", "latitude", "antena", "azimuth_deg", "downtilt_deg"]
+            site_headers = ["Sitio", "Radio", "Sector/antena", "Longitud", "Latitud", "Antena", "Azimut", "Downtilt"]
         site_rows = [[row.get(key, "") for key in site_keys] for row in sites]
-        story.append(_data_table(site_headers, site_rows, styles, [24 * mm, 34 * mm, 34 * mm, 55 * mm, 29 * mm, 27 * mm, 27 * mm]))
+        story.append(_data_table(site_headers, site_rows, styles, [24 * mm, 25 * mm, 36 * mm, 30 * mm, 30 * mm, 50 * mm, 25 * mm, 25 * mm]))
 
     story.extend(
         [

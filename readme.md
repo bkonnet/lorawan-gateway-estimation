@@ -27,6 +27,9 @@ Está orientada a despliegues industriales, logísticos y portuarios, especialme
 - Separación mínima configurable entre sitios y distribución espacial de gateways añadidos por capacidad.
 - Perfil RF ajustable para terminales de contenedores.
 - Antenas omnidireccionales, sectoriales y direccionales con ganancia, HPBW, azimut y downtilt.
+- Densidad de sitios candidatos independiente de la cantidad de azimuts evaluados.
+- Varios sectores/antenas por sitio físico, con un radio explícito por sector.
+- Beneficio opcional y parametrizado de rechazo espacial de interferencia, desactivado por defecto.
 - Cambio de preset de antena sincronizado automáticamente con ganancia, HPBW, atenuación y downtilt.
 - Orientación automática de antenas direccionales según cobertura y margen RF útil dentro del polígono.
 - Flechas de orientación recortadas al primer límite del área para evitar representaciones engañosas.
@@ -278,7 +281,7 @@ No es necesario convertir previamente un KMZ. Si contiene varias carpetas o elem
 
 ### Ambiente RF
 
-Los presets definen valores iniciales de exponente de pérdida, pérdida adicional y margen de desvanecimiento. Todos son editables. El preset **Terminal de contenedores** es deliberadamente conservador, pero debe calibrarse con mediciones RSSI/SNR del sitio.
+Los presets definen valores iniciales de exponente de pérdida, pérdida adicional y margen de desvanecimiento. Todos son editables. El preset **Terminal de contenedores** inicia en `n=3,6`, `12 dB` de pérdida adicional y `20 dB` de margen. Los valores solo se completan cuando faltan; una entrada manual o un escenario restaurado no se sobrescribe silenciosamente. El preset es deliberadamente conservador, pero debe calibrarse con mediciones RSSI/SNR del sitio.
 
 La opción **Calcular rango por incertidumbre del exponente** ejecuta tres diseños manteniendo iguales los demás parámetros: favorable (`n - variación`), base (`n`) y crítico (`n + variación`). La variación inicial es `±0,3`. La tabla resultante informa radio de boresight, gateways por capacidad, gateways por cobertura, total final y porcentaje de redundancia robusta. El rango solo incluye escenarios que alcanzan toda la redundancia exigida. Un escenario incompleto informa cuántos gateways fueron ubicados y qué cobertura consiguió, pero queda explícitamente fuera del límite superior hasta resolver sus restricciones espaciales.
 
@@ -308,9 +311,11 @@ El campo **Gateways mínimos por punto** exige que cada punto supere la sensibil
 
 La opción **Exigir redundancia dentro del HPBW horizontal** evita considerar un lóbulo lateral o posterior como enlace redundante robusto. Está habilitada por defecto: el optimizador debe orientar hacia el punto el haz principal de cada gateway contado. En el mapa, verde significa redundancia robusta dentro del HPBW, amarillo indica redundancia RF que depende de al menos un lóbulo lateral y rojo indica que ni siquiera el link budget alcanza la redundancia requerida.
 
+El informe siempre muestra ambos resultados: **cobertura robusta** según el criterio seleccionado y **cobertura RF total** por link budget, incluidos enlaces laterales. Aunque un sitio tenga varios sectores, para redundancia cada punto puede sumar ese sitio una sola vez.
+
 ### Antenas y orientación
 
-Cada gateway se modela con una antena. La aplicación incluye estos perfiles iniciales:
+El modelo separa tres cantidades: **sitios físicos** (ubicaciones), **radios/gateways** (capacidad RF) y **sectores/antenas** (orientaciones). En el modelo actual cada sector usa un radio; varios sectores pueden compartir un sitio, pero no crean diversidad geográfica adicional. La aplicación incluye estos perfiles iniciales:
 
 | Perfil | Ganancia inicial | HPBW horizontal | HPBW vertical |
 |---|---:|---:|---:|
@@ -319,11 +324,13 @@ Cada gateway se modela con una antena. La aplicación incluye estos perfiles ini
 | Direccional | 15 dBi | 30° | 30° |
 | Personalizada | editable | editable | editable |
 
-También se configuran altura del gateway, altura del dispositivo, downtilt y atenuación lateral/trasera. Para antenas sectoriales y direccionales, el planificador evalúa diferentes azimuts y exporta la orientación propuesta para cada gateway.
+También se configuran altura del gateway, altura del dispositivo, downtilt, atenuación lateral/trasera y máximo de sectores por sitio. Para antenas sectoriales y direccionales, el planificador evalúa diferentes azimuts y exporta identificadores separados de sitio, radio y sector.
 
 El radio mostrado es el máximo en el eje principal o *boresight*. Fuera de ese eje se aplica una atenuación aproximada basada en las anchuras de haz horizontal y vertical. Una antena de mayor ganancia puede aumentar el alcance frontal y, al mismo tiempo, aumentar la cantidad de gateways necesaria para cubrir un polígono completo si su haz es estrecho.
 
-Los valores deben reemplazarse por la ficha técnica o, idealmente, por los patrones de radiación medidos del modelo de antena seleccionado. El cálculo supone una antena sectorial/direccional por gateway; varias sectoriales conectadas a un único concentrador requieren modelar además splitters, combinadores, aislamiento y pérdidas de inserción.
+Los valores deben reemplazarse por la ficha técnica o, idealmente, por los patrones de radiación medidos del modelo de antena seleccionado. El modelo supone un radio independiente por sector. Si la implementación comparte un concentrador mediante splitters o combinadores, deben agregarse manualmente sus pérdidas y validarse aislamiento, simultaneidad y capacidad.
+
+El **rechazo espacial de interferencia** es opcional y vale `0 dB` por defecto. Cuando se habilita, solo para antenas no omnidireccionales, se descuenta el valor configurado de la penalización explícita de interferencia uplink, sin bajar de `0 dB`. No altera ganancia, patrón, potencia ni downlink y debe respaldarse con mediciones o un escenario documentado.
 
 ### Algoritmo
 
@@ -333,14 +340,15 @@ Los valores deben reemplazarse por la ficha técnica o, idealmente, por los patr
 4. Aplica sensibilidad por SF, margen de diseño y pérdida de montaje del dispositivo.
 5. Aplica el patrón horizontal/vertical, altura, downtilt y obstáculos atravesados.
 6. Si está habilitado el criterio HPBW, descarta como redundancia robusta los enlaces fuera del haz principal horizontal.
-7. Selecciona ubicaciones y azimuts preliminares mediante un algoritmo greedy multi-cover.
-8. Si quedan puntos sin redundancia, agrega candidatos dirigidos alrededor de esos puntos y del perímetro y repite la optimización con una malla ampliada.
-9. Deriva una distribución SF usando la señal del gateway de redundancia objetivo.
-10. Reporta cobertura robusta, cobertura RF incluyendo lóbulos laterales, margen mínimo y percentil 10 del margen.
-11. Calcula el resultado final como el máximo entre capacidad y cobertura.
+7. Genera primero una cantidad comparable de sitios físicos para todos los tipos de antena; los azimuts se expanden después y no reducen ese presupuesto espacial.
+8. Selecciona sitios y sectores mediante un algoritmo greedy multi-cover; varios sectores colocalizados amplían cobertura, pero cada sitio cuenta una sola vez por punto para redundancia.
+9. Si quedan puntos sin redundancia, agrega candidatos dirigidos alrededor de esos puntos y del perímetro y repite la optimización.
+10. Deriva una distribución SF usando la señal del sitio de redundancia objetivo.
+11. Reporta sitios, radios, sectores, cobertura robusta, cobertura RF total, margen mínimo/P10 y distribución SF.
+12. Calcula los radios finales como el máximo entre capacidad y radios exigidos por cobertura.
 
 ```text
-Gateways finales = MAX(gateways por capacidad, gateways por cobertura)
+Radios finales = MAX(radios por capacidad, radios/sectores por cobertura)
 ```
 
 Las ubicaciones son candidatas matemáticas dentro del polígono. Antes de construir se deben validar acceso físico, energía, backhaul, altura, permisos, estructuras metálicas y mediciones de campo.

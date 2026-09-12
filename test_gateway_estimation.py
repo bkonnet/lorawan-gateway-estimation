@@ -7,6 +7,7 @@ from gateway_estimation import (
     distribucion_por_dr_fijo,
     estimar_gateways,
     environment_preset_input_state,
+    initialize_environment_preset_defaults,
     payload_fisico_downlink,
     payload_fisico_uplink,
     restorable_input_state,
@@ -103,6 +104,13 @@ class GatewayEstimationTests(unittest.TestCase):
         self.assertGreater(
             container["input_additional_loss"], open_area["input_additional_loss"]
         )
+
+    def test_container_defaults_fill_missing_values_without_overwriting_manual_input(self):
+        state = {"input_additional_loss": 3.5}
+        initialize_environment_preset_defaults(state, "Terminal de contenedores")
+        self.assertEqual(state["input_additional_loss"], 3.5)
+        self.assertEqual(state["input_fade_margin"], 20.0)
+        self.assertEqual(state["input_path_loss_exponent"], 3.6)
 
 
 if __name__ == "__main__":
