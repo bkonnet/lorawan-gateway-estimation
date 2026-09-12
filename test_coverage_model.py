@@ -8,6 +8,7 @@ from coverage_model import (
     ANTENNA_PRESETS,
     AntennaConfig,
     RadioConfig,
+    _greedy_multicover,
     antenna_attenuation_db,
     augment_gateway_deployments,
     augment_gateway_sites,
@@ -24,6 +25,7 @@ from coverage_model import (
     plan_coverage,
     ray_length_within_geometry,
     link_received_power_dbm,
+    link_margins_db,
     obstacle_crossing_count,
 )
 
@@ -55,6 +57,127 @@ SQUARE_KML = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 class CoverageModelTests(unittest.TestCase):
+    def test_candidate_site_budget_is_independent_of_azimuth_count(self):
+        geometry = parse_geojson(SQUARE)
+        radio = RadioConfig(validate_downlink=False)
+        omni = AntennaConfig(horizontal_beamwidth_deg=360.0)
+        directional = AntennaConfig(
+            antenna_type="Direccional",
+            gain_dbi=15.0,
+            horizontal_beamwidth_deg=30.0,
+            vertical_beamwidth_deg=30.0,
+            max_sectors_per_site=4,
+        )
+        omni_plan = plan_coverage(
+            geometry, radio, antenna=omni, redundancy=1,
+            resolution_m=150, max_candidate_points=40,
+        )
+        directional_plan = plan_coverage(
+            geometry, radio, antenna=directional, redundancy=1,
+            resolution_m=150, max_candidate_points=40,
+        )
+        self.assertEqual(omni_plan.max_candidate_sites, 40)
+        self.assertEqual(directional_plan.max_candidate_sites, 40)
+        self.assertGreaterEqual(directional_plan.candidate_site_count, 36)
+        self.assertGreater(
+            len(directional_plan.candidate_points),
+            directional_plan.candidate_site_count,
+        )
+
+    def test_multisector_site_can_cover_more_area_but_counts_once(self):
+        selected, remaining = _greedy_multicover(
+            coverage_sets=[[0], [1]],
+            candidate_quality_scores=[1.0, 1.0],
+            candidate_points=[(0.0, 0.0), (0.0, 0.0)],
+            candidate_site_ids=[0, 0],
+            evaluation_weights=[1.0, 1.0],
+            point_count=2,
+            redundancy=1,
+            minimum_site_separation_m=100.0,
+            dispersion_weight=0.0,
+            dispersion_scale_m=100.0,
+            max_sectors_per_site=2,
+        )
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(remaining, [0, 0])
+
+    def test_colocated_sectors_never_satisfy_two_site_redundancy(self):
+        geometry = parse_geojson(SQUARE)
+        antenna = AntennaConfig(
+            antenna_type="Sectorial",
+            gain_dbi=12.0,
+            horizontal_beamwidth_deg=120.0,
+            vertical_beamwidth_deg=180.0,
+            max_sectors_per_site=3,
+            gateway_height_m=1.5,
+            device_height_m=1.5,
+        )
+        radio = RadioConfig(
+            validate_downlink=False,
+            sf_sensitivities_dbm=(-160.0,) * 6,
+            path_loss_exponent=2.0,
+            additional_loss_db=0.0,
+            fade_margin_db=0.0,
+        )
+        plan = plan_coverage(
+            geometry, radio, antenna=antenna, redundancy=2,
+            resolution_m=200, require_hpbw_redundancy=False,
+        )
+        point = plan.evaluation_points[0]
+        analysis = deployment_link_analysis(
+            plan, [point, point], [0.0, 180.0], [point]
+        )
+        self.assertEqual(analysis[0]["radio_count"], 1)
+        self.assertEqual(analysis[0]["count"], 1)
+
+    def test_optional_spatial_rejection_is_explicit_and_directional_only(self):
+        gateway = (0.0, 0.0)
+        device = (0.0, 100.0)
+        directional = AntennaConfig(
+            antenna_type="Sectorial",
+            horizontal_beamwidth_deg=60.0,
+            vertical_beamwidth_deg=180.0,
+            gateway_height_m=1.5,
+            device_height_m=1.5,
+        )
+        omni = AntennaConfig(
+            horizontal_beamwidth_deg=360.0,
+            vertical_beamwidth_deg=180.0,
+            gateway_height_m=1.5,
+            device_height_m=1.5,
+        )
+        baseline = RadioConfig(validate_downlink=False, uplink_interference_db=10.0)
+        rejected = RadioConfig(
+            validate_downlink=False,
+            uplink_interference_db=10.0,
+            directional_interference_rejection_db=4.0,
+        )
+        directional_base = link_margins_db(
+            gateway, device, 0.0, baseline, directional
+        )[0]
+        directional_rejected = link_margins_db(
+            gateway, device, 0.0, rejected, directional
+        )[0]
+        self.assertAlmostEqual(directional_rejected - directional_base, 4.0)
+        omni_base = link_margins_db(gateway, device, 0.0, baseline, omni)[0]
+        omni_rejected = link_margins_db(gateway, device, 0.0, rejected, omni)[0]
+        self.assertAlmostEqual(omni_rejected, omni_base)
+
+    def test_zero_spatial_rejection_preserves_basic_link_budget(self):
+        gateway = (0.0, 0.0)
+        device = (0.0, 250.0)
+        antenna = AntennaConfig()
+        original = RadioConfig(validate_downlink=False, uplink_interference_db=7.0)
+        explicit_zero = RadioConfig(
+            validate_downlink=False,
+            uplink_interference_db=7.0,
+            directional_interference_rejection_db=0.0,
+        )
+        self.assertEqual(
+            link_margins_db(gateway, device, 0.0, original, antenna),
+            link_margins_db(gateway, device, 0.0, explicit_zero, antenna),
+        )
+
     def test_geojson_area_is_plausible(self):
         geometry = parse_geojson(json.dumps(SQUARE))
         self.assertGreater(geometry.area_m2, 900_000)
@@ -220,6 +343,9 @@ class CoverageModelTests(unittest.TestCase):
             points, geometry.projection, azimuths, antenna
         )
         self.assertIn("azimuth_deg", exported["features"][0]["properties"])
+        self.assertIn("site_id", exported["features"][0]["properties"])
+        self.assertIn("radio_id", exported["features"][0]["properties"])
+        self.assertIn("sector_id", exported["features"][0]["properties"])
         self.assertEqual(
             exported["features"][0]["properties"]["antenna_type"],
             "Sectorial 60° × 35°",

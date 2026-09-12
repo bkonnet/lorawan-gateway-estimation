@@ -70,7 +70,9 @@ def fast_link_margins_db(
         - antenna_loss
         - obstacle_loss
     )
-    uplink_margin = uplink_received - radio.effective_receiver_sensitivity_dbm
+    uplink_margin = uplink_received - radio.effective_sensitivity_for_sf(
+        radio.target_sf, antenna
+    )
     downlink_margin = downlink_received - radio.device_receiver_sensitivity_dbm
     limiting_margin = (
         min(uplink_margin, downlink_margin)
@@ -170,9 +172,11 @@ def timed_plan_coverage(*args, **kwargs):
         "[coverage-performance] "
         f"total={elapsed:.3f}s "
         f"evaluation_points={len(result.evaluation_points)} "
-        f"candidates={len(result.candidate_points)} "
+        f"candidate_sites={result.candidate_site_count} "
+        f"candidate_orientations={len(result.candidate_points)} "
         f"candidate_point_pairs={links} "
-        f"selected_gateways={len(result.selected_points)}",
+        f"selected_sites={result.physical_site_count} "
+        f"selected_radios={result.radio_count}",
         flush=True,
     )
     return result

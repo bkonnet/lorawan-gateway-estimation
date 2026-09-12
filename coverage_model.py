@@ -58,6 +58,7 @@ ANTENNA_PRESETS = {
         "vertical_beamwidth_deg": 30.0,
         "max_attenuation_db": 25.0,
         "downtilt_deg": 0.0,
+        "max_sectors_per_site": 1,
     },
     "Sectorial 60° × 35°": {
         "gain_dbi": 12.0,
@@ -65,6 +66,7 @@ ANTENNA_PRESETS = {
         "vertical_beamwidth_deg": 35.0,
         "max_attenuation_db": 25.0,
         "downtilt_deg": 4.0,
+        "max_sectors_per_site": 6,
     },
     "Direccional 30° × 30°": {
         "gain_dbi": 15.0,
@@ -72,6 +74,7 @@ ANTENNA_PRESETS = {
         "vertical_beamwidth_deg": 30.0,
         "max_attenuation_db": 30.0,
         "downtilt_deg": 4.0,
+        "max_sectors_per_site": 12,
     },
     "Personalizada": {
         "gain_dbi": 10.0,
@@ -79,6 +82,7 @@ ANTENNA_PRESETS = {
         "vertical_beamwidth_deg": 45.0,
         "max_attenuation_db": 25.0,
         "downtilt_deg": 3.0,
+        "max_sectors_per_site": 4,
     },
 }
 
@@ -162,6 +166,7 @@ class RadioConfig:
     validate_downlink: bool = True
     sf_sensitivities_dbm: tuple[float, ...] = tuple(SF_SENSITIVITY_DBM.values())
     uplink_interference_db: float = 0.0
+    directional_interference_rejection_db: float = 0.0
     obstacle_loss_db: float = 0.0
     maximum_obstacle_loss_db: float = 40.0
 
@@ -180,9 +185,27 @@ class RadioConfig:
             raise ValueError("Debe configurar una sensibilidad para cada SF7-SF12.")
         return float(self.sf_sensitivities_dbm[labels.index(sf_label)])
 
-    def effective_sensitivity_for_sf(self, sf_label: str) -> float:
-        return self.sensitivity_for_sf(sf_label) + max(
-            float(self.uplink_interference_db), 0.0
+    def effective_interference_db(
+        self, antenna: AntennaConfig | None = None
+    ) -> float:
+        """Return the explicit uplink noise-rise penalty after optional rejection.
+
+        Spatial rejection is deliberately opt-in (zero by default), applies only
+        to non-omnidirectional antennas, and can never create a gain larger than
+        the configured interference penalty.
+        """
+        rejection = (
+            max(float(self.directional_interference_rejection_db), 0.0)
+            if antenna is not None and not antenna.is_omnidirectional
+            else 0.0
+        )
+        return max(float(self.uplink_interference_db) - rejection, 0.0)
+
+    def effective_sensitivity_for_sf(
+        self, sf_label: str, antenna: AntennaConfig | None = None
+    ) -> float:
+        return self.sensitivity_for_sf(sf_label) + self.effective_interference_db(
+            antenna
         )
 
 
@@ -196,6 +219,7 @@ class AntennaConfig:
     downtilt_deg: float = 0.0
     gateway_height_m: float = 20.0
     device_height_m: float = 1.5
+    max_sectors_per_site: int = 1
 
     @property
     def is_omnidirectional(self) -> bool:
@@ -227,6 +251,8 @@ class CoveragePlan:
     minimum_site_separation_m: float
     edge_priority: float
     dispersion_weight: float
+    max_candidate_sites: int
+    max_sectors_per_site: int
     obstacles: ProjectedGeometry | None = None
 
     @property
@@ -236,6 +262,28 @@ class CoveragePlan:
     @property
     def selected_azimuths_deg(self) -> list[float]:
         return [self.candidate_azimuths_deg[index] for index in self.selected_indices]
+
+    @property
+    def selected_site_ids(self) -> list[int]:
+        return list(dict.fromkeys(
+            self.candidate_site_ids[index] for index in self.selected_indices
+        ))
+
+    @property
+    def physical_site_count(self) -> int:
+        return len(self.selected_site_ids)
+
+    @property
+    def radio_count(self) -> int:
+        return len(self.selected_indices)
+
+    @property
+    def antenna_count(self) -> int:
+        return len(self.selected_indices)
+
+    @property
+    def candidate_site_count(self) -> int:
+        return len(set(self.candidate_site_ids))
 
 
 def parse_geojson(
@@ -509,12 +557,14 @@ def obstacle_attenuation_db(
     )
 
 
-def coverage_radius_m(config: RadioConfig) -> float:
+def coverage_radius_m(
+    config: RadioConfig, antenna: AntennaConfig | None = None
+) -> float:
     uplink_available_path_loss = (
         config.tx_eirp_dbm
         + config.gateway_gain_dbi
         - config.gateway_cable_loss_db
-        - config.effective_receiver_sensitivity_dbm
+        - config.effective_sensitivity_for_sf(config.target_sf, antenna)
         - config.fade_margin_db
         - config.additional_loss_db
         - config.device_installation_loss_db
@@ -691,7 +741,7 @@ def link_margins_db(
         link_received_power_dbm(
             gateway, device, azimuth_deg, radio, antenna, obstacles
         )
-        - radio.effective_receiver_sensitivity_dbm
+        - radio.effective_sensitivity_for_sf(radio.target_sf, antenna)
     )
     downlink_margin = (
         downlink_received_power_dbm(
@@ -710,7 +760,10 @@ def link_margins_db(
 def _candidate_azimuths(antenna: AntennaConfig) -> list[float]:
     if antenna.is_omnidirectional:
         return [0.0]
-    requested_step = min(max(antenna.horizontal_beamwidth_deg / 2, 15.0), 60.0)
+    # Adjacent HPBW sectors meet at their -3 dB edges, so one orientation per
+    # beamwidth provides full angular search coverage without evaluating a
+    # redundant half-beam grid.
+    requested_step = min(max(antenna.horizontal_beamwidth_deg, 15.0), 60.0)
     count = max(1, math.ceil(360 / requested_step))
     step = 360 / count
     return [index * step for index in range(count)]
@@ -814,25 +867,36 @@ def _greedy_multicover(
     minimum_site_separation_m: float,
     dispersion_weight: float,
     dispersion_scale_m: float,
+    max_sectors_per_site: int = 1,
 ) -> tuple[list[int], list[int]]:
+    """Select antenna/radio candidates while counting redundancy by physical site."""
     remaining = [redundancy] * point_count
     selected: list[int] = []
     available = set(range(len(coverage_sets)))
+    covered_by_site: dict[int, set[int]] = {}
+    sectors_by_site: dict[int, int] = {}
 
     while available and any(value > 0 for value in remaining):
         def selection_score(candidate: int) -> tuple[float, float, int]:
+            site_id = candidate_site_ids[candidate]
+            already_covered = covered_by_site.get(site_id, set())
             useful_points = [
                 point_index
                 for point_index in coverage_sets[candidate]
-                if remaining[point_index] > 0
+                if remaining[point_index] > 0 and point_index not in already_covered
             ]
             weighted_coverage = sum(
                 evaluation_weights[point_index] for point_index in useful_points
             )
-            if selected and dispersion_weight > 0:
+            selected_other_sites = [
+                chosen
+                for chosen in selected
+                if candidate_site_ids[chosen] != site_id
+            ]
+            if selected_other_sites and dispersion_weight > 0 and site_id not in covered_by_site:
                 minimum_distance = min(
                     math.dist(candidate_points[candidate], candidate_points[chosen])
-                    for chosen in selected
+                    for chosen in selected_other_sites
                 )
                 dispersion_ratio = min(
                     minimum_distance / max(dispersion_scale_m, 1.0), 1.0
@@ -845,25 +909,39 @@ def _greedy_multicover(
             )
 
         best = max(available, key=selection_score)
-        score = sum(1 for point_index in coverage_sets[best] if remaining[point_index] > 0)
+        best_site = candidate_site_ids[best]
+        score = sum(
+            1
+            for point_index in coverage_sets[best]
+            if remaining[point_index] > 0
+            and point_index not in covered_by_site.get(best_site, set())
+        )
         if score == 0:
             break
         selected.append(best)
         selected_site = candidate_site_ids[best]
         selected_point = candidate_points[best]
-        blocked_sites = {
+        previous_site_coverage = covered_by_site.setdefault(selected_site, set())
+        newly_covered = set(coverage_sets[best]) - previous_site_coverage
+        previous_site_coverage.update(coverage_sets[best])
+        sectors_by_site[selected_site] = sectors_by_site.get(selected_site, 0) + 1
+        blocked_neighbor_sites = {
             candidate_site_ids[index]
             for index in available
-            if candidate_site_ids[index] == selected_site
-            or math.dist(candidate_points[index], selected_point)
-            < minimum_site_separation_m
+            if candidate_site_ids[index] != selected_site
+            and math.dist(candidate_points[index], selected_point)
+                < minimum_site_separation_m
         }
+        available.discard(best)
         available = {
-            index
-            for index in available
-            if candidate_site_ids[index] not in blocked_sites
+            index for index in available
+            if candidate_site_ids[index] not in blocked_neighbor_sites
+            and not (
+                candidate_site_ids[index] == selected_site
+                and sectors_by_site[selected_site] >= max_sectors_per_site
+            )
         }
-        for point_index in coverage_sets[best]:
+        for point_index in newly_covered:
             if remaining[point_index] > 0:
                 remaining[point_index] -= 1
     return selected, remaining
@@ -873,9 +951,10 @@ def _sf_for_power(
     received_dbm: float,
     fade_margin_db: float,
     config: RadioConfig,
+    antenna: AntennaConfig | None = None,
 ) -> str:
     for sf_label in ("SF7", "SF8", "SF9", "SF10", "SF11", "SF12"):
-        if received_dbm >= config.effective_sensitivity_for_sf(sf_label) + fade_margin_db:
+        if received_dbm >= config.effective_sensitivity_for_sf(sf_label, antenna) + fade_margin_db:
             return sf_label
     return "SF12"
 
@@ -895,32 +974,25 @@ def _derive_sf_distribution(
         counts["SF12"] = len(evaluation_points)
     else:
         for point in evaluation_points:
-            powers = sorted(
-                (
-                    link_received_power_dbm(
-                        gateway,
-                        point,
-                        selected_azimuths_deg[index],
-                        config,
-                        antenna,
-                        obstacles,
-                    )
-                    for index, gateway in enumerate(selected_points)
-                    if not require_hpbw_redundancy
-                    or link_within_horizontal_hpbw(
-                        gateway,
-                        point,
-                        selected_azimuths_deg[index],
-                        antenna,
-                    )
-                ),
-                reverse=True,
-            )
+            powers_by_site: dict[tuple[float, float], float] = {}
+            for gateway, azimuth in zip(selected_points, selected_azimuths_deg):
+                if require_hpbw_redundancy and not link_within_horizontal_hpbw(
+                    gateway, point, azimuth, antenna
+                ):
+                    continue
+                power = link_received_power_dbm(
+                    gateway, point, azimuth, config, antenna, obstacles
+                )
+                site_key = (round(gateway[0], 6), round(gateway[1], 6))
+                powers_by_site[site_key] = max(
+                    power, powers_by_site.get(site_key, -math.inf)
+                )
+            powers = sorted(powers_by_site.values(), reverse=True)
             if not powers:
                 counts["SF12"] += 1
                 continue
             rank = min(max(redundancy - 1, 0), len(powers) - 1)
-            counts[_sf_for_power(powers[rank], config.fade_margin_db, config)] += 1
+            counts[_sf_for_power(powers[rank], config.fade_margin_db, config, antenna)] += 1
     total = max(sum(counts.values()), 1)
     return {sf: count / total for sf, count in counts.items()}
 
@@ -931,7 +1003,7 @@ def deployment_link_analysis(
     gateway_azimuths_deg: list[float],
     evaluation_points: Iterable[tuple[float, float]] | None = None,
 ) -> list[dict[str, float | int]]:
-    """Return point-level redundant link margins for a deployed network."""
+    """Return point-level margins, counting redundancy by distinct physical site."""
     if len(gateway_points) != len(gateway_azimuths_deg):
         raise ValueError("Cada gateway debe tener exactamente un azimut.")
     points_to_evaluate = (
@@ -942,14 +1014,17 @@ def deployment_link_analysis(
     radius_squared = plan.radius_m * plan.radius_m
     analysis: list[dict[str, float | int]] = []
     for point in points_to_evaluate:
-        links: list[tuple[float, float, float, bool]] = []
+        links_by_site: dict[
+            tuple[float, float], list[tuple[float, float, float, bool]]
+        ] = {}
         for gateway, azimuth in zip(gateway_points, gateway_azimuths_deg):
             if (
                 (gateway[0] - point[0]) ** 2 + (gateway[1] - point[1]) ** 2
                 > radius_squared
             ):
                 continue
-            links.append(
+            site_key = (round(gateway[0], 6), round(gateway[1], 6))
+            links_by_site.setdefault(site_key, []).append(
                 (
                     *link_margins_db(
                         gateway,
@@ -964,19 +1039,30 @@ def deployment_link_analysis(
                     ),
                 )
             )
+        best_radio_links = [
+            max(site_links, key=lambda link: link[2])
+            for site_links in links_by_site.values()
+        ]
+        best_hpbw_links = [
+            max(
+                (link for link in site_links if link[3]),
+                key=lambda link: link[2],
+                default=None,
+            )
+            for site_links in links_by_site.values()
+        ]
+        best_hpbw_links = [link for link in best_hpbw_links if link is not None]
         radio_count = sum(
             limiting >= plan.radio_config.fade_margin_db
-            for _, _, limiting, _ in links
+            for _, _, limiting, _ in best_radio_links
         )
         hpbw_count = sum(
-            limiting >= plan.radio_config.fade_margin_db and within_hpbw
-            for _, _, limiting, within_hpbw in links
+            limiting >= plan.radio_config.fade_margin_db
+            for _, _, limiting, _ in best_hpbw_links
         )
-        eligible_links = [
-            link
-            for link in links
-            if not plan.require_hpbw_redundancy or link[3]
-        ]
+        eligible_links = (
+            best_hpbw_links if plan.require_hpbw_redundancy else best_radio_links
+        )
         eligible_links.sort(key=lambda item: item[2], reverse=True)
         count = hpbw_count if plan.require_hpbw_redundancy else radio_count
         rank = plan.redundancy - 1
@@ -1151,7 +1237,7 @@ def plan_coverage(
     dispersion_weight: float = 0.30,
     obstacles: ProjectedGeometry | None = None,
     max_evaluation_points: int = 3_000,
-    max_candidate_points: int = 1_500,
+    max_candidate_points: int = 200,
     require_hpbw_redundancy: bool = True,
 ) -> CoveragePlan:
     antenna = antenna or AntennaConfig(gain_dbi=config.gateway_gain_dbi)
@@ -1159,7 +1245,12 @@ def plan_coverage(
     minimum_site_separation_m = max(float(minimum_site_separation_m), 0.0)
     edge_priority = max(float(edge_priority), 1.0)
     dispersion_weight = min(max(float(dispersion_weight), 0.0), 1.0)
-    radius_m = coverage_radius_m(config)
+    max_candidate_sites = max(int(max_candidate_points), 10)
+    max_sectors_per_site = (
+        1 if antenna.is_omnidirectional
+        else max(int(antenna.max_sectors_per_site), 1)
+    )
+    radius_m = coverage_radius_m(config, antenna)
     # Treat the requested resolution as the largest design cell and verify at
     # twice that density. This prevents a narrow gap between visible samples
     # from being accepted as fully covered.
@@ -1180,7 +1271,9 @@ def plan_coverage(
     ] * len(boundary_points)
     candidate_spacing = max(effective_resolution, min(radius_m / 2, radius_m * 0.75))
     azimuth_options = _candidate_azimuths(antenna)
-    max_base_candidates = max(max_candidate_points // len(azimuth_options), 10)
+    # This budget is physical sites, not antenna orientations. Omni and
+    # directional alternatives therefore explore the same spatial density.
+    max_base_candidates = max_candidate_sites
     base_candidate_points, _ = _grid_points(
         geometry, candidate_spacing, max_base_candidates
     )
@@ -1235,6 +1328,7 @@ def plan_coverage(
             minimum_site_separation_m,
             dispersion_weight,
             radius_m,
+            max_sectors_per_site,
         )
         return (
             candidate_points,
@@ -1269,7 +1363,7 @@ def plan_coverage(
             minimum_site_separation_m,
             max_base_candidates,
         )
-        refined_site_limit = min(max_base_candidates * 2, max_candidate_points)
+        refined_site_limit = max_candidate_sites
         refined_sites = _spread_sample_points(
             physical_candidate_points + targeted_sites + boundary_points,
             refined_site_limit,
@@ -1326,7 +1420,8 @@ def plan_coverage(
         area_m2=geometry.area_m2,
         radius_m=radius_m,
         isotropic_radius_m=coverage_radius_m(
-            replace(config, gateway_gain_dbi=0.0)
+            replace(config, gateway_gain_dbi=0.0),
+            replace(antenna, horizontal_beamwidth_deg=360.0, max_sectors_per_site=1),
         ),
         evaluation_points=evaluation_points,
         evaluation_weights=evaluation_weights,
@@ -1348,6 +1443,8 @@ def plan_coverage(
         minimum_site_separation_m=minimum_site_separation_m,
         edge_priority=edge_priority,
         dispersion_weight=dispersion_weight,
+        max_candidate_sites=max_candidate_sites,
+        max_sectors_per_site=max_sectors_per_site,
         obstacles=obstacles,
     )
 
@@ -1369,7 +1466,7 @@ def augment_gateway_deployments(
         candidates_by_site.setdefault(site_id, []).append(index)
 
     available_sites = set(candidates_by_site) - selected_site_ids
-    target_count = min(max(target_count, len(selected)), len(candidates_by_site))
+    target_count = min(max(target_count, len(selected)), len(plan.candidate_points))
     while len(selected) < target_count and available_sites:
         eligible_sites = {
             site_id
@@ -1408,6 +1505,34 @@ def augment_gateway_deployments(
         selected.append(best)
         selected_site_ids.add(best_site)
         available_sites.remove(best_site)
+
+    # If radio capacity exceeds the number of usable physical sites, add unused
+    # orientations at already selected sites up to the configured sector limit.
+    sectors_by_site = {
+        site_id: sum(plan.candidate_site_ids[index] == site_id for index in selected)
+        for site_id in selected_site_ids
+    }
+    while len(selected) < target_count:
+        eligible = [
+            index
+            for index in range(len(plan.candidate_points))
+            if index not in selected
+            and plan.candidate_site_ids[index] in selected_site_ids
+            and sectors_by_site[plan.candidate_site_ids[index]]
+                < plan.max_sectors_per_site
+        ]
+        if not eligible:
+            break
+        best = max(
+            eligible,
+            key=lambda index: (
+                plan.candidate_coverage_counts[index],
+                plan.candidate_quality_scores[index],
+            ),
+        )
+        selected.append(best)
+        site_id = plan.candidate_site_ids[best]
+        sectors_by_site[site_id] += 1
     return (
         [plan.candidate_points[index] for index in selected],
         [plan.candidate_azimuths_deg[index] for index in selected],
@@ -1429,8 +1554,18 @@ def gateway_sites_geojson(
     points = list(points)
     azimuths = list(azimuths_deg) if azimuths_deg is not None else [0.0] * len(points)
     features = []
+    site_numbers: dict[tuple[float, float], int] = {}
+    sectors_per_site: dict[int, int] = {}
     for index, (lon, lat) in enumerate(points_to_lon_lat(points, projection), start=1):
+        point = points[index - 1]
+        site_key = (round(point[0], 6), round(point[1], 6))
+        site_number = site_numbers.setdefault(site_key, len(site_numbers) + 1)
+        sectors_per_site[site_number] = sectors_per_site.get(site_number, 0) + 1
         properties = {
+            "site_id": f"SITE-{site_number:02d}",
+            "radio_id": f"RADIO-{index:02d}",
+            "sector_id": f"SITE-{site_number:02d}-ANT-{sectors_per_site[site_number]:02d}",
+            # Legacy field retained for existing GeoJSON consumers.
             "gateway_id": f"GW-{index:02d}",
             "azimuth_deg": round(azimuths[index - 1], 1),
         }
